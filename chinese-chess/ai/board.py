@@ -181,17 +181,17 @@ class Board:
 
     def _is_valid_bing_move(self, sr, sc, er, ec, player):
         if player == 'red':
-            if er < sr:
+            if er > sr:  # Red advances upwards (decreasing row)
                 return False
-            if sr >= 5:
-                return er == sr + 1 and sc == ec
-            return (er == sr + 1 and sc == ec) or (er == sr and abs(sc - ec) == 1)
+            if sr <= 4:  # Crossed river
+                return (er == sr - 1 and sc == ec) or (er == sr and abs(sc - ec) == 1)
+            return er == sr - 1 and sc == ec
         else:
-            if er > sr:
+            if er < sr:  # Black advances downwards (increasing row)
                 return False
-            if sr <= 4:
-                return er == sr - 1 and sc == ec
-            return (er == sr - 1 and sc == ec) or (er == sr and abs(sc - ec) == 1)
+            if sr >= 5:  # Crossed river
+                return (er == sr + 1 and sc == ec) or (er == sr and abs(sc - ec) == 1)
+            return er == sr + 1 and sc == ec
 
     def _jiang_face_to_face(self):
         jiang_pos = None
