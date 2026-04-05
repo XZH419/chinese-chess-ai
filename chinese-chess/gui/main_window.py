@@ -1,8 +1,21 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QGridLayout, QLabel, QPushButton
-from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QGridLayout, QLabel, QPushButton, QSpinBox, QHBoxLayout
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from ai.board import Board
 from ai.ai_minimax import MinimaxAI
+
+class AIMoveThread(QThread):
+    move_found = pyqtSignal(tuple)
+
+    def __init__(self, ai, board, time_limit):
+        super().__init__()
+        self.ai = ai
+        self.board = board
+        self.time_limit = time_limit
+
+    def run(self):
+        move = self.ai.get_best_move(self.board, time_limit=self.time_limit)
+        self.move_found.emit(move)
 
 class ChessBoardWidget(QWidget):
     def __init__(self, board, click_handler):
@@ -43,9 +56,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.board = Board()
-        self.ai = MinimaxAI(depth=3)
+        self.ai = MinimaxAI(depth=2)
         self.human_color = 'red'
         self.selected = None
+        self.ai_thread = None
+        self.time_limit = 5
         self.init_ui()
 
     def init_ui(self):
@@ -62,6 +77,16 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel(f"{self.board.current_player}'s turn")
         layout.addWidget(self.status_label)
 
+        time_layout = QHBoxLayout()
+        time_label = QLabel("AI Think Time (seconds):")
+        self.time_spinbox = QSpinBox()
+        self.time_spinbox.setRange(1, 60)
+        self.time_spinbox.setValue(self.time_limit)
+        self.time_spinbox.valueChanged.connect(self.on_time_changed)
+        time_layout.addWidget(time_label)
+        time_layout.addWidget(self.time_spinbox)
+        layout.addLayout(time_layout)
+
         button_layout = QVBoxLayout()
         self.ai_button = QPushButton("AI Move")
         self.ai_button.clicked.connect(self.ai_move)
@@ -73,6 +98,9 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(button_layout)
         central_widget.setLayout(layout)
+
+    def on_time_changed(self, value):
+        self.time_limit = value
 
     def on_square_clicked(self, row, col):
         if self.board.is_game_over():
@@ -108,7 +136,14 @@ class MainWindow(QMainWindow):
         if self.board.is_game_over():
             self.status_label.setText("Game Over")
             return
-        move = self.ai.get_best_move(self.board, time_limit=5)
+        if self.ai_thread and self.ai_thread.isRunning():
+            return  # Already computing
+        self.status_label.setText("AI thinking...")
+        self.ai_thread = AIMoveThread(self.ai, self.board, time_limit=self.time_limit)
+        self.ai_thread.move_found.connect(self.on_ai_move_found)
+        self.ai_thread.start()
+
+    def on_ai_move_found(self, move):
         if move:
             self.board.make_move(*move)
             self.board_widget.update_board()
@@ -120,6 +155,9 @@ class MainWindow(QMainWindow):
             self.status_label.setText("AI has no legal move")
 
     def reset_game(self):
+        if self.ai_thread and self.ai_thread.isRunning():
+            self.ai_thread.terminate()
+            self.ai_thread.wait()
         self.board = Board()
         self.board_widget.board = self.board
         self.selected = None
