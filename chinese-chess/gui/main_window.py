@@ -10,7 +10,7 @@ class AIMoveThread(QThread):
     def __init__(self, ai, board, time_limit):
         super().__init__()
         self.ai = ai
-        self.board = board
+        self.board = board.copy()
         self.time_limit = time_limit
 
     def run(self):
@@ -45,12 +45,27 @@ class ChessBoardWidget(QWidget):
             for c in range(self.board.cols):
                 piece = self.board.board[r][c]
                 text = str(piece) if piece else ''
+                if piece:
+                    if piece.color == 'red':
+                        style = "font-size: 18px; border: 1px solid black; color: red; background-color: #ffe6e6;"
+                    else:
+                        style = "font-size: 18px; border: 1px solid black; color: black; background-color: #e6e6e6;"
+                else:
+                    style = "font-size: 18px; border: 1px solid black; background-color: white;"
                 self.buttons[r][c].setText(text)
-                self.buttons[r][c].setStyleSheet("font-size: 18px; border: 1px solid black;")
+                self.buttons[r][c].setStyleSheet(style)
 
     def highlight_square(self, row, col):
         if 0 <= row < self.board.rows and 0 <= col < self.board.cols:
-            self.buttons[row][col].setStyleSheet("font-size: 18px; border: 2px solid red; background: #ffe6e6;")
+            piece = self.board.board[row][col]
+            if piece:
+                if piece.color == 'red':
+                    style = "font-size: 18px; border: 2px solid red; background: #ffcccc; color: red;"
+                else:
+                    style = "font-size: 18px; border: 2px solid red; background: #ffcccc; color: black;"
+            else:
+                style = "font-size: 18px; border: 2px solid red; background: #ffcccc;"
+            self.buttons[row][col].setStyleSheet(style)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -99,11 +114,26 @@ class MainWindow(QMainWindow):
         layout.addLayout(button_layout)
         central_widget.setLayout(layout)
 
+    def get_winner(self):
+        red_jiang = any(piece and piece.color == 'red' and piece.piece_type == 'jiang' for row in self.board.board for piece in row)
+        black_jiang = any(piece and piece.color == 'black' and piece.piece_type == 'jiang' for row in self.board.board for piece in row)
+        if not red_jiang:
+            return 'black'
+        if not black_jiang:
+            return 'red'
+        if not self.board.has_legal_moves('red'):
+            return 'black'
+        if not self.board.has_legal_moves('black'):
+            return 'red'
+        return None
+
     def on_time_changed(self, value):
         self.time_limit = value
 
     def on_square_clicked(self, row, col):
-        if self.board.is_game_over():
+        winner = self.get_winner()
+        if winner:
+            self.status_label.setText(f"{winner.capitalize()} Wins!")
             return
         if self.board.current_player != self.human_color:
             return
@@ -122,14 +152,19 @@ class MainWindow(QMainWindow):
                     self.board.undo_move(sr, sc, er, ec, captured)
                     self.status_label.setText("Illegal move: king in check")
                 else:
+                    self.board_widget.board = self.board
                     self.board_widget.update_board()
                     self.selected = None
-                    self.status_label.setText(f"{self.board.current_player}'s turn")
-                    if not self.board.is_game_over():
+                    winner = self.get_winner()
+                    if winner:
+                        self.status_label.setText(f"{winner.capitalize()} Wins!")
+                    else:
+                        self.status_label.setText(f"{self.board.current_player}'s turn")
                         self.ai_move()
             else:
                 self.status_label.setText("Invalid move")
                 self.selected = None
+            self.board_widget.board = self.board
             self.board_widget.update_board()
 
     def ai_move(self):
@@ -146,9 +181,11 @@ class MainWindow(QMainWindow):
     def on_ai_move_found(self, move):
         if move:
             self.board.make_move(*move)
+            self.board_widget.board = self.board
             self.board_widget.update_board()
-            if self.board.is_game_over():
-                self.status_label.setText("Game Over")
+            winner = self.get_winner()
+            if winner:
+                self.status_label.setText(f"{winner.capitalize()} Wins!")
             else:
                 self.status_label.setText(f"{self.board.current_player}'s turn")
         else:

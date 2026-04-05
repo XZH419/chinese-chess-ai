@@ -218,6 +218,8 @@ class Board:
 
     def make_move(self, start_row, start_col, end_row, end_col):
         piece = self.board[start_row][start_col]
+        if piece is None:
+            return None
         captured = self.board[end_row][end_col]
         self.board[end_row][end_col] = piece
         self.board[start_row][start_col] = None
