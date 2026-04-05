@@ -1,15 +1,19 @@
+"""中国象棋棋盘和走棋规则逻辑模块。"""
+
 from .pieces import Piece
 
 class Board:
     def __init__(self):
+        # 标准中国象棋棋盘大小：10 行 9 列。
         self.rows = 10
         self.cols = 9
         self.board = [[None for _ in range(self.cols)] for _ in range(self.rows)]
-        self.current_player = 'red'  # 'red' starts
+        # 本实现中红方先走。
+        self.current_player = 'red'
         self.init_board()
 
     def init_board(self):
-        # Black pieces (top)
+        # 初始化黑方棋子在上方。
         self.board[0][0] = Piece('black', 'che')
         self.board[0][1] = Piece('black', 'ma')
         self.board[0][2] = Piece('black', 'xiang')
@@ -29,7 +33,7 @@ class Board:
         self.board[3][6] = Piece('black', 'bing')
         self.board[3][8] = Piece('black', 'bing')
 
-        # Red pieces (bottom)
+        # 初始化红方棋子在下方。
         self.board[9][0] = Piece('red', 'che')
         self.board[9][1] = Piece('red', 'ma')
         self.board[9][2] = Piece('red', 'xiang')
@@ -58,6 +62,11 @@ class Board:
         return 0 <= row < self.rows and 0 <= col < self.cols
 
     def is_valid_move(self, start_row, start_col, end_row, end_col, player=None, check_legality=True):
+        """检查指定棋子走子是否合法。
+
+        如果 check_legality 为 True，还会验证走子后是否导致己方将帅被将军，
+        或者是否出现对面将帅见面的非法局面。
+        """
         player = player or self.current_player
         if not self._inside_board(start_row, start_col) or not self._inside_board(end_row, end_col):
             return False
@@ -93,6 +102,7 @@ class Board:
         if not check_legality:
             return True
 
+        # 模拟走子后检查是否出现将帅见面或己方将被将军。
         captured = self.board[end_row][end_col]
         self.board[end_row][end_col] = piece
         self.board[start_row][start_col] = None
@@ -106,6 +116,7 @@ class Board:
         return True
 
     def _is_valid_jiang_move(self, sr, sc, er, ec, player):
+        # 将帅只能在九宫内沿直线走一步。
         if abs(sr - er) + abs(sc - ec) != 1:
             return False
         if player == 'red':
@@ -113,6 +124,7 @@ class Board:
         return 0 <= er <= 2 and 3 <= ec <= 5
 
     def _is_valid_shi_move(self, sr, sc, er, ec, player):
+        # 士在九宫内沿斜线走一步。
         if abs(sr - er) != 1 or abs(sc - ec) != 1:
             return False
         if player == 'red':
@@ -120,6 +132,7 @@ class Board:
         return 0 <= er <= 2 and 3 <= ec <= 5
 
     def _is_valid_xiang_move(self, sr, sc, er, ec, player):
+        # 象走田字格，不能过河，且眼位不能被堵住。
         if abs(sr - er) != 2 or abs(sc - ec) != 2:
             return False
         eye_r = (sr + er) // 2
@@ -131,6 +144,7 @@ class Board:
         return er <= 4
 
     def _is_valid_ma_move(self, sr, sc, er, ec):
+        # 马走日字，腿部被堵时不能走。
         dr = abs(sr - er)
         dc = abs(sc - ec)
         if not ((dr == 2 and dc == 1) or (dr == 1 and dc == 2)):
@@ -146,6 +160,7 @@ class Board:
         return True
 
     def _is_valid_che_move(self, sr, sc, er, ec):
+        # 车直线移动，路径上不能有阻挡棋子。
         if sr != er and sc != ec:
             return False
         if sr == er:
@@ -161,6 +176,7 @@ class Board:
         return True
 
     def _is_valid_pao_move(self, sr, sc, er, ec):
+        # 炮不吃子时走直线，吃子时必须隔一个子。
         if sr != er and sc != ec:
             return False
         target = self.get_piece(er, ec)
@@ -180,20 +196,22 @@ class Board:
         return count == 0
 
     def _is_valid_bing_move(self, sr, sc, er, ec, player):
+        # 兵/卒向前一步，过河后可以横着走一步。
         if player == 'red':
-            if er > sr:  # Red advances upwards (decreasing row)
+            if er > sr:
                 return False
-            if sr <= 4:  # Crossed river
+            if sr <= 4:  # 红兵过河后允许横走。
                 return (er == sr - 1 and sc == ec) or (er == sr and abs(sc - ec) == 1)
             return er == sr - 1 and sc == ec
         else:
-            if er < sr:  # Black advances downwards (increasing row)
+            if er < sr:
                 return False
-            if sr >= 5:  # Crossed river
+            if sr >= 5:  # 黑卒过河后允许横走。
                 return (er == sr + 1 and sc == ec) or (er == sr and abs(sc - ec) == 1)
             return er == sr + 1 and sc == ec
 
     def _jiang_face_to_face(self):
+        # 检查“将帅见面”特殊规则：同一列上无棋子阻挡时不能直接对峙。
         jiang_pos = None
         shuai_pos = None
         for r in range(self.rows):
@@ -217,6 +235,7 @@ class Board:
         return True
 
     def make_move(self, start_row, start_col, end_row, end_col):
+        # 执行走子，同时处理吃子逻辑并切换当前执子方。
         piece = self.board[start_row][start_col]
         if piece is None:
             return None
@@ -227,12 +246,15 @@ class Board:
         return captured
 
     def undo_move(self, start_row, start_col, end_row, end_col, captured):
+        # 撤销刚才的走子，还原被吃棋子和当前执子方。
         piece = self.board[end_row][end_col]
         self.board[start_row][start_col] = piece
         self.board[end_row][end_col] = captured
         self.current_player = 'black' if self.current_player == 'red' else 'red'
 
     def get_all_moves(self, player, validate_self_check=True):
+        # 生成指定方的所有合法走法。
+        # 如果 validate_self_check 为 True，则返回的走法不会使己方被将军。
         moves = []
         for r in range(self.rows):
             for c in range(self.cols):
@@ -248,6 +270,7 @@ class Board:
         return self.get_all_moves(player, validate_self_check=True)
 
     def is_check(self, player):
+        # 判断指定方的将帅是否处于被将军状态。
         opponent = 'black' if player == 'red' else 'red'
         jiang_pos = None
         for r in range(self.rows):
@@ -273,6 +296,7 @@ class Board:
         return not self.is_check(player) and not self.has_legal_moves(player)
 
     def is_game_over(self):
+        # 当任意一方将被吃掉或任意一方无合法走法时，游戏结束。
         red_jiang = any(piece and piece.color == 'red' and piece.piece_type == 'jiang' for row in self.board for piece in row)
         black_jiang = any(piece and piece.color == 'black' and piece.piece_type == 'jiang' for row in self.board for piece in row)
         if not red_jiang or not black_jiang:
@@ -282,6 +306,7 @@ class Board:
         return False
 
     def copy(self):
+        # 创建棋盘的深拷贝，用于搜索或模拟而不影响原棋盘状态。
         import copy
         new_board = Board()
         new_board.board = copy.deepcopy(self.board)
@@ -289,6 +314,7 @@ class Board:
         return new_board
 
     def __str__(self):
+        # 将棋盘渲染为简单文本表格，便于在控制台打印查看。
         result = ''
         for r in range(self.rows):
             result += f'{r} '

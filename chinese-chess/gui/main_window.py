@@ -4,7 +4,12 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from ai.board import Board
 from ai.ai_minimax import MinimaxAI
 
+# 人机对战图形界面模块。
+# 棋盘使用按钮网格显示，AI 思考在后台线程运行，避免界面阻塞。
+
 class AIMoveThread(QThread):
+    """后台线程，用于执行AI搜索，不阻塞主窗口界面。"""
+
     move_found = pyqtSignal(tuple)
 
     def __init__(self, ai, board, time_limit):
@@ -18,6 +23,8 @@ class AIMoveThread(QThread):
         self.move_found.emit(move)
 
 class ChessBoardWidget(QWidget):
+    """棋盘显示控件，将棋盘每个格子渲染为可点击的按钮。"""
+
     def __init__(self, board, click_handler):
         super().__init__()
         self.board = board
@@ -25,6 +32,7 @@ class ChessBoardWidget(QWidget):
         self.init_ui()
 
     def init_ui(self):
+        # 构建一个 10x9 的按钮网格，用于表示棋盘上的每个格子。
         layout = QGridLayout()
         self.buttons = []
         for r in range(self.board.rows):
@@ -41,6 +49,7 @@ class ChessBoardWidget(QWidget):
         self.update_board()
 
     def update_board(self):
+        # 根据当前棋盘状态刷新所有格子的文本和颜色显示。
         for r in range(self.board.rows):
             for c in range(self.board.cols):
                 piece = self.board.board[r][c]
@@ -56,6 +65,7 @@ class ChessBoardWidget(QWidget):
                 self.buttons[r][c].setStyleSheet(style)
 
     def highlight_square(self, row, col):
+        # 将选中的棋盘格高亮显示，便于玩家确认所选棋子位置。
         if 0 <= row < self.board.rows and 0 <= col < self.board.cols:
             piece = self.board.board[row][col]
             if piece:
@@ -79,7 +89,7 @@ class MainWindow(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("Chinese Chess AI")
+        self.setWindowTitle("中国象棋 AI")
         self.setGeometry(100, 100, 600, 700)
 
         central_widget = QWidget()
@@ -89,11 +99,12 @@ class MainWindow(QMainWindow):
         self.board_widget = ChessBoardWidget(self.board, self.on_square_clicked)
         layout.addWidget(self.board_widget)
 
-        self.status_label = QLabel(f"{self.board.current_player}'s turn")
+        player_name = '红方' if self.board.current_player == 'red' else '黑方'
+        self.status_label = QLabel(f"{player_name}回合")
         layout.addWidget(self.status_label)
 
         time_layout = QHBoxLayout()
-        time_label = QLabel("AI Think Time (seconds):")
+        time_label = QLabel("AI 思考时间（秒）：")
         self.time_spinbox = QSpinBox()
         self.time_spinbox.setRange(1, 60)
         self.time_spinbox.setValue(self.time_limit)
@@ -103,11 +114,11 @@ class MainWindow(QMainWindow):
         layout.addLayout(time_layout)
 
         button_layout = QVBoxLayout()
-        self.ai_button = QPushButton("AI Move")
+        self.ai_button = QPushButton("AI 走子")
         self.ai_button.clicked.connect(self.ai_move)
         button_layout.addWidget(self.ai_button)
 
-        self.reset_button = QPushButton("Reset")
+        self.reset_button = QPushButton("重置")
         self.reset_button.clicked.connect(self.reset_game)
         button_layout.addWidget(self.reset_button)
 
@@ -115,6 +126,7 @@ class MainWindow(QMainWindow):
         central_widget.setLayout(layout)
 
     def get_winner(self):
+        """判断游戏是否结束，返回获胜方，否则返回 None。"""
         red_jiang = any(piece and piece.color == 'red' and piece.piece_type == 'jiang' for row in self.board.board for piece in row)
         black_jiang = any(piece and piece.color == 'black' and piece.piece_type == 'jiang' for row in self.board.board for piece in row)
         if not red_jiang:
@@ -131,9 +143,11 @@ class MainWindow(QMainWindow):
         self.time_limit = value
 
     def on_square_clicked(self, row, col):
+        # 处理用户点击事件，支持选中棋子和落子操作。
         winner = self.get_winner()
         if winner:
-            self.status_label.setText(f"{winner.capitalize()} Wins!")
+            winner_name = '红方' if winner == 'red' else '黑方'
+            self.status_label.setText(f"{winner_name}获胜！")
             return
         if self.board.current_player != self.human_color:
             return
@@ -142,7 +156,7 @@ class MainWindow(QMainWindow):
             if piece and piece.color == self.human_color:
                 self.selected = (row, col)
                 self.board_widget.highlight_square(row, col)
-                self.status_label.setText(f"Selected {row},{col}")
+                self.status_label.setText(f"选中 {row},{col}")
         else:
             sr, sc = self.selected
             er, ec = row, col
@@ -150,48 +164,55 @@ class MainWindow(QMainWindow):
                 captured = self.board.make_move(sr, sc, er, ec)
                 if self.board.is_check(self.human_color):
                     self.board.undo_move(sr, sc, er, ec, captured)
-                    self.status_label.setText("Illegal move: king in check")
+                    self.status_label.setText("非法走子：将帅被将军")
                 else:
                     self.board_widget.board = self.board
                     self.board_widget.update_board()
                     self.selected = None
                     winner = self.get_winner()
                     if winner:
-                        self.status_label.setText(f"{winner.capitalize()} Wins!")
+                        winner_name = '红方' if winner == 'red' else '黑方'
+                        self.status_label.setText(f"{winner_name}获胜！")
                     else:
-                        self.status_label.setText(f"{self.board.current_player}'s turn")
+                        player_name = '红方' if self.board.current_player == 'red' else '黑方'
+                        self.status_label.setText(f"{player_name}回合")
                         self.ai_move()
             else:
-                self.status_label.setText("Invalid move")
+                self.status_label.setText("无效走子")
                 self.selected = None
             self.board_widget.board = self.board
             self.board_widget.update_board()
 
     def ai_move(self):
+        # 在后台线程中启动AI搜索，避免界面卡顿或无响应。
         if self.board.is_game_over():
-            self.status_label.setText("Game Over")
+            self.status_label.setText("游戏结束")
             return
         if self.ai_thread and self.ai_thread.isRunning():
-            return  # Already computing
-        self.status_label.setText("AI thinking...")
+            return
+        self.status_label.setText("AI 思考中...")
         self.ai_thread = AIMoveThread(self.ai, self.board, time_limit=self.time_limit)
         self.ai_thread.move_found.connect(self.on_ai_move_found)
         self.ai_thread.start()
 
     def on_ai_move_found(self, move):
+        # AI搜索完成后应用走法并刷新界面显示。
         if move:
             self.board.make_move(*move)
             self.board_widget.board = self.board
             self.board_widget.update_board()
             winner = self.get_winner()
             if winner:
-                self.status_label.setText(f"{winner.capitalize()} Wins!")
+                winner_name = '红方' if winner == 'red' else '黑方'
+                self.status_label.setText(f"{winner_name}获胜！")
             else:
-                self.status_label.setText(f"{self.board.current_player}'s turn")
+                player_name = '红方' if self.board.current_player == 'red' else '黑方'
+                self.status_label.setText(f"{player_name}回合")
         else:
-            self.status_label.setText("AI has no legal move")
+            self.status_label.setText("AI 无合法走法")
 
     def reset_game(self):
+        # 停止正在运行的AI计算并复位棋盘到初始状态。
         if self.ai_thread and self.ai_thread.isRunning():
             self.ai_thread.terminate()
             self.ai_thread.wait()
@@ -199,7 +220,8 @@ class MainWindow(QMainWindow):
         self.board_widget.board = self.board
         self.selected = None
         self.board_widget.update_board()
-        self.status_label.setText(f"{self.board.current_player}'s turn")
+        player_name = '红方' if self.board.current_player == 'red' else '黑方'
+        self.status_label.setText(f"{player_name}回合")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

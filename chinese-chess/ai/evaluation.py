@@ -1,6 +1,9 @@
+"""中国象棋局面评估逻辑模块。"""
+
 from .pieces import Piece
 
 class Evaluation:
+    # 各棋子类型的基础价值。
     PIECE_VALUES = {
         'jiang': 10000,
         'shi': 120,
@@ -36,11 +39,15 @@ class Evaluation:
             [0, 0, 0, 0, 0, 0, 0, 0, 0],
             [0, 0, 0, 0, 0, 0, 0, 0, 0]
         ]
-        # Add more position values for other pieces
+        # 如果需要，可为其他棋子添加位置价值表。
     }
 
     @staticmethod
     def evaluate(board):
+        """计算当前局面的启发式评分。
+
+        正分表示红方优势，负分表示黑方优势。
+        """
         score = 0
         for r in range(board.rows):
             for c in range(board.cols):
@@ -49,16 +56,16 @@ class Evaluation:
                     value = Evaluation.PIECE_VALUES[piece.piece_type]
                     if piece.color == 'red':
                         score += value
-                        # Add position value
+                        # 加上棋子的位置加成。
                         if piece.piece_type in Evaluation.POSITION_VALUES:
                             score += Evaluation.POSITION_VALUES[piece.piece_type][r][c]
                     else:
                         score -= value
-                        # Add position value (flip for black)
+                        # 黑方位置加成需要翻转行坐标。
                         if piece.piece_type in Evaluation.POSITION_VALUES:
                             score -= Evaluation.POSITION_VALUES[piece.piece_type][9-r][c]
 
-        # Add mobility bonus
+        # 加入机动性奖励，走法更多的一方略占优势。
         red_moves = len(board.get_all_moves('red'))
         black_moves = len(board.get_all_moves('black'))
         score += (red_moves - black_moves) * 0.1

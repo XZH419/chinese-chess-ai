@@ -1,1 +1,1 @@
-# Chinese Chess AI Package
+# 中国象棋 AI 包
