@@ -1,4 +1,9 @@
 import sys
+import os
+
+# Ensure the repo root is importable so `import chess...` works even when the
+# user runs `python main.py` from inside the `chinese-chess/` directory.
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 # 中国象棋程序入口。
 # 如果传入参数 "gui"，则启动图形界面；否则启动控制台对战。
