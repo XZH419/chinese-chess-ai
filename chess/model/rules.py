@@ -238,19 +238,88 @@ class Rules:
             for c in range(board.cols):
                 piece = board.board[r][c]
                 if piece and piece.color == player:
-                    for er in range(board.rows):
-                        for ec in range(board.cols):
-                            if Rules.is_valid_move(
-                                board,
-                                r,
-                                c,
-                                er,
-                                ec,
-                                player=player,
-                                check_legality=validate_self_check,
-                            ):
-                                moves.append((r, c, er, ec))
+                    # 性能关键：不要暴力枚举 10*9 个目标格。
+                    # 先按棋子类型生成“候选目标格”，再用 is_valid_move 做最终过滤。
+                    candidates = Rules._candidate_targets(board, r, c, piece.piece_type, player)
+                    for er, ec in candidates:
+                        if Rules.is_valid_move(
+                            board,
+                            r,
+                            c,
+                            er,
+                            ec,
+                            player=player,
+                            check_legality=validate_self_check,
+                        ):
+                            moves.append((r, c, er, ec))
         return moves
+
+    @staticmethod
+    def _candidate_targets(board: Board, r: int, c: int, piece_type: str, player: str):
+        """按棋子类型生成候选落点（不保证合法，后续用 is_valid_move 过滤）。
+
+        目标：显著降低 get_all_moves 的复杂度，使 Minimax 深度 3 在 Python 中可用。
+        """
+
+        cand = []
+
+        def add(rr, cc):
+            if board._inside_board(rr, cc):
+                cand.append((rr, cc))
+
+        if piece_type == "jiang":
+            add(r - 1, c)
+            add(r + 1, c)
+            add(r, c - 1)
+            add(r, c + 1)
+            # 将帅对面“照面吃”由 is_valid_move 的 legality 检查处理
+            return cand
+
+        if piece_type == "shi":
+            add(r - 1, c - 1)
+            add(r - 1, c + 1)
+            add(r + 1, c - 1)
+            add(r + 1, c + 1)
+            return cand
+
+        if piece_type == "xiang":
+            add(r - 2, c - 2)
+            add(r - 2, c + 2)
+            add(r + 2, c - 2)
+            add(r + 2, c + 2)
+            return cand
+
+        if piece_type == "ma":
+            # 8 个日字落点，蹩马脚由 is_valid_move 内部处理
+            for dr, dc in [(2, 1), (2, -1), (-2, 1), (-2, -1), (1, 2), (1, -2), (-1, 2), (-1, -2)]:
+                add(r + dr, c + dc)
+            return cand
+
+        if piece_type in ("che", "pao"):
+            # 车/炮：四个方向一直走到边界；炮的“隔子吃”由 is_valid_move 内部处理
+            for dr, dc in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+                rr, cc = r + dr, c + dc
+                while board._inside_board(rr, cc):
+                    cand.append((rr, cc))
+                    rr += dr
+                    cc += dc
+            return cand
+
+        if piece_type == "bing":
+            # 兵/卒：最多 3 个候选点（过河后可横走）
+            if player == "red":
+                add(r - 1, c)
+                if r <= 4:
+                    add(r, c - 1)
+                    add(r, c + 1)
+            else:
+                add(r + 1, c)
+                if r >= 5:
+                    add(r, c - 1)
+                    add(r, c + 1)
+            return cand
+
+        return cand
 
     @staticmethod
     def get_legal_moves(board: Board, player):

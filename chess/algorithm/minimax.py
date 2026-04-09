@@ -7,6 +7,7 @@ and API updates (Board.make_move -> Board.apply_move, Board.*rules -> Rules.*).
 from __future__ import annotations
 
 import time
+from typing import Optional, Tuple
 
 from chess.model.rules import Rules
 
@@ -17,75 +18,117 @@ class MinimaxAI:
     def __init__(self, depth=3):
         # Minimax搜索的深度限制。
         self.depth = depth
+        self._nodes = 0
 
-    def get_best_move(self, board, time_limit=10):
-        # 在允许时间内选择最优走法。
-        start_time = time.time()
+    def choose_move(self, board, time_limit: Optional[float] = 10.0) -> Optional[Tuple[int, int, int, int]]:
+        """Searcher 接口：为当前 board.current_player 选择一步。"""
+        return self.get_best_move(board, time_limit=time_limit)
+
+    def get_best_move(self, board, time_limit: Optional[float] = 10.0):
+        """在允许时间内选择最优走法（Alpha-Beta Minimax）。"""
+        start = time.time()
+        self._nodes = 0
+
+        player = board.current_player
+        maximizing = (player == "red")  # 评估函数基础分为 red-black
         best_move = None
-        original_player = board.current_player
-        best_value = float("-inf") if original_player == "red" else float("inf")
+        best_value = float("-inf") if maximizing else float("inf")
 
-        moves = Rules.get_legal_moves(board, original_player)
+        moves = Rules.get_legal_moves(board, player)
         for move in moves:
+            if time_limit is not None and (time.time() - start) > time_limit:
+                break
+
             captured = board.apply_move(*move)
-            value = self.minimax(
-                board,
-                self.depth - 1,
-                float("-inf"),
-                float("inf"),
-                original_player != "red",
-                start_time,
-                time_limit,
+            value = self._alphabeta(
+                board=board,
+                depth=self.depth - 1,
+                alpha=float("-inf"),
+                beta=float("inf"),
+                maximizing=not maximizing,
+                start_time=start,
+                time_limit=time_limit,
+                maximizing_color=player,
             )
             board.undo_move(*move, captured)
 
-            if original_player == "red":  # 红方为最大化方
+            if maximizing:
                 if value > best_value:
                     best_value = value
                     best_move = move
-            else:  # 黑方为最小化方
+            else:
                 if value < best_value:
                     best_value = value
                     best_move = move
 
-            if time.time() - start_time > time_limit:
-                break
-
+        elapsed = time.time() - start
+        print(f"本次搜索深度: {self.depth}")
+        print(f"搜索耗时 (秒): {elapsed:.3f}")
+        print(f"评估的节点总数: {self._nodes}")
         return best_move
 
-    def minimax(self, board, depth, alpha, beta, maximizing, start_time, time_limit):
-        # 如果超时，则返回中性评估值，终止更深层次搜索。
-        if time.time() - start_time > time_limit:
-            return 0
+    def _alphabeta(
+        self,
+        board,
+        depth: int,
+        alpha: float,
+        beta: float,
+        maximizing: bool,
+        start_time: float,
+        time_limit: Optional[float],
+        maximizing_color: str,
+    ) -> float:
+        """标准 Alpha-Beta 剪枝递归。"""
+        if time_limit is not None and (time.time() - start_time) > time_limit:
+            # 超时：返回当前评估（不再扩展）
+            self._nodes += 1
+            return Evaluation.evaluate(board, maximizing_color=maximizing_color)
+
         if depth == 0 or Rules.is_game_over(board):
-            return Evaluation.evaluate(board)
+            self._nodes += 1
+            return Evaluation.evaluate(board, maximizing_color=maximizing_color)
+
+        player = board.current_player
+        moves = Rules.get_legal_moves(board, player)
 
         if maximizing:
-            max_eval = float("-inf")
-            moves = Rules.get_legal_moves(board, board.current_player)
+            value = float("-inf")
             for move in moves:
                 captured = board.apply_move(*move)
-                eval = self.minimax(
-                    board, depth - 1, alpha, beta, False, start_time, time_limit
+                child = self._alphabeta(
+                    board=board,
+                    depth=depth - 1,
+                    alpha=alpha,
+                    beta=beta,
+                    maximizing=False,
+                    start_time=start_time,
+                    time_limit=time_limit,
+                    maximizing_color=maximizing_color,
                 )
                 board.undo_move(*move, captured)
-                max_eval = max(max_eval, eval)
-                alpha = max(alpha, eval)
+                value = max(value, child)
+                alpha = max(alpha, value)
                 if beta <= alpha:
                     break
-            return max_eval
+            return value
         else:
-            min_eval = float("inf")
-            moves = Rules.get_legal_moves(board, board.current_player)
+            value = float("inf")
             for move in moves:
                 captured = board.apply_move(*move)
-                eval = self.minimax(
-                    board, depth - 1, alpha, beta, True, start_time, time_limit
+                child = self._alphabeta(
+                    board=board,
+                    depth=depth - 1,
+                    alpha=alpha,
+                    beta=beta,
+                    maximizing=True,
+                    start_time=start_time,
+                    time_limit=time_limit,
+                    maximizing_color=maximizing_color,
                 )
                 board.undo_move(*move, captured)
-                min_eval = min(min_eval, eval)
-                beta = min(beta, eval)
+                value = min(value, child)
+                beta = min(beta, value)
                 if beta <= alpha:
                     break
-            return min_eval
+            return value
 

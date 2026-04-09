@@ -5,7 +5,7 @@ from typing import Dict, Optional, Tuple
 
 import traceback
 
-from PyQt5.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QThread, pyqtSignal
+from PyQt5.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -258,10 +258,10 @@ class XiangqiBoardView(QGraphicsView):
 class MainWindow(QMainWindow):
     """新 GUI：风格对齐参考 GameView（贴图棋盘/棋子 + 侧边信息区）。"""
 
-    def __init__(self):
+    def __init__(self, controller: Optional[GameController] = None):
         super().__init__()
 
-        self.controller = GameController()  # 默认黑方 RandomAI
+        self.controller = controller or GameController()
         self.human_color = "red"
 
         self._selected: Optional[Pos] = None
@@ -272,6 +272,8 @@ class MainWindow(QMainWindow):
         self._init_window()
         self._init_ui()
         self._refresh_status()
+        # 启动时立即检查：如果红方是 AI，则自动走子
+        self.check_and_run_ai()
 
     def _init_window(self) -> None:
         self.setWindowTitle("中国象棋 AI (Controller 驱动)")
@@ -306,7 +308,8 @@ class MainWindow(QMainWindow):
         right.addWidget(self.time_spin)
 
         self.ai_btn = QPushButton("AI 走子")
-        self.ai_btn.clicked.connect(self._maybe_start_ai_turn)
+        # 旧入口 `_maybe_start_ai_turn` 已被更通用的接力机制替代
+        self.ai_btn.clicked.connect(self.check_and_run_ai)
         right.addWidget(self.ai_btn)
 
         self.reset_btn = QPushButton("重置")
@@ -350,6 +353,9 @@ class MainWindow(QMainWindow):
         if self.controller.is_game_over():
             self._refresh_status()
             return
+        # 权限控制：如果当前回合是 AI，则忽略一切鼠标点击
+        if self.controller.agent_for(self.controller.board.current_player) is not None:
+            return
         if self.controller.board.current_player != self.human_color:
             return
 
@@ -392,27 +398,33 @@ class MainWindow(QMainWindow):
         # Animate based on model coordinates; do NOT compute rules here.
         self.board_view.animate_move(move)
         self._refresh_status()
-        self._maybe_start_ai_turn()
+        # 玩家走完后，触发下一手（可能是黑方 AI，也可能是红方 AI vs AI 场景）
+        self.check_and_run_ai()
 
-    def _maybe_start_ai_turn(self) -> None:
+    def check_and_run_ai(self) -> None:
+        """接力棒机制：如果当前回合是 AI，则自动启动计算并落子。"""
         if self.controller.is_game_over():
             self._refresh_status()
             return
-        if self.controller.board.current_player != self.controller.ai_color:
+
+        current_agent = self.controller.agent_for(self.controller.board.current_player)
+        if current_agent is None:
+            # 人类回合：等待点击
             return
+
+        # 避免重复启动线程
         if self._ai_thread and self._ai_thread.isRunning():
             return
 
-        print("[UI] starting AI thread")
+        print("[UI] 检测到 AI 回合，启动计算...")
         self.status_label.setText("AI 思考中...")
-        # 启动线程前把“纯数据”准备好传入线程：
-        # - ai 对象（不包含任何 Qt/UI 引用）
-        # - board_snapshot（拷贝）
+
         board_snapshot = self.controller.board.copy()
+        ai_color = self.controller.board.current_player
         self._ai_thread = AIMoveThread(
-            ai=self.controller.ai,
+            ai=current_agent,
             board_snapshot=board_snapshot,
-            ai_color=self.controller.ai_color,
+            ai_color=ai_color,
             time_limit_s=self._time_limit_s,
         )
         self._ai_thread.move_ready.connect(self._on_ai_move_ready)
@@ -421,12 +433,14 @@ class MainWindow(QMainWindow):
     def _on_ai_move_ready(self, move: Optional[Move]) -> None:
         print(f"[UI] AI move signal received: {move}")
         if move:
-            self.controller.apply_move(move, player=self.controller.ai_color)
+            self.controller.apply_move(move, player=self.controller.board.current_player)
             self.board_view.animate_move(move)
         else:
             # AI 无合法走法（困毙/将死由 Rules.winner 判定）
             pass
         self._refresh_status()
+        # 两个 AI 对弈时避免过快：延迟 0.5 秒再触发下一步
+        QTimer.singleShot(500, self.check_and_run_ai)
 
 
 if __name__ == "__main__":
