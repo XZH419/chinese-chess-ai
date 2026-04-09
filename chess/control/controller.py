@@ -102,6 +102,16 @@ class GameController:
             "black_is_human": self.black_agent is None,
         }
 
+    def reset_game(self) -> None:
+        """重置棋盘到初始局面，但**保留**当前 red_agent / black_agent 配置。
+
+        用途：
+        - GUI/Benchmark 反复开新局时不丢失命令行传入的对局模式
+        - AI vs AI / 人机模式都能保持一致
+        """
+
+        self.board = Board()
+
     def maybe_play_ai_turn(self, time_limit: float = 5.0) -> MoveOutcome:
         """若轮到 AI，则让对应 agent 走一步；否则返回 ok=False。
 

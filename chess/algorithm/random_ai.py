@@ -19,9 +19,11 @@ class RandomAI:
 
     def __init__(self, seed: Optional[int] = None):
         self._rng = random.Random(seed)
+        self.last_stats = {}
 
     # Searcher-style API (recommended)
     def choose_move(self, board, time_limit: Optional[float] = None) -> Optional[Tuple[int, int, int, int]]:
+        self.last_stats = {"depth": 0, "time_taken": 0.0, "nodes_evaluated": 0}
         moves = Rules.get_legal_moves(board, board.current_player)
         if not moves:
             return None

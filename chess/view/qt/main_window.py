@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Dict, Optional, Tuple
 
 import traceback
 
-from PyQt5.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QIcon, QPainter, QPixmap
+from PyQt5.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QThread, pyqtSignal
+from PyQt5.QtGui import QFont, QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QGraphicsObject,
@@ -16,8 +17,8 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -64,15 +65,16 @@ def _piece_code(color: str, piece_type: str) -> str:
 class AIMoveThread(QThread):
     """后台线程：计算 AI 的下一步走法（不阻塞 UI）。"""
 
-    move_ready = pyqtSignal(object)  # Move | None
+    move_ready = pyqtSignal(object, object, int)  # (Move|None, stats:dict|None, run_id)
 
-    def __init__(self, ai, board_snapshot, ai_color: str, time_limit_s: int):
+    def __init__(self, ai, board_snapshot, ai_color: str, time_limit_s: int, run_id: int):
         super().__init__()
         # 线程中绝对不持有任何 UI / controller 对象，避免隐式触碰主线程资源
         self._ai = ai
         self._board = board_snapshot
         self._ai_color = ai_color
         self._time_limit_s = time_limit_s
+        self._run_id = run_id
 
     def run(self) -> None:
         # 仅在纯数据上计算走法：board_snapshot / ai
@@ -85,11 +87,12 @@ class AIMoveThread(QThread):
                 self._board.current_player = self._ai_color
                 move = self._ai.get_best_move(self._board, time_limit=self._time_limit_s)
             print("[AI Thread] finished, emitting signal")
-            self.move_ready.emit(move)
+            stats = getattr(self._ai, "last_stats", None)
+            self.move_ready.emit(move, stats, self._run_id)
         except Exception as e:
             print("[AI Thread] exception:", e)
             traceback.print_exc()
-            self.move_ready.emit(None)
+            self.move_ready.emit(None, {"error": str(e)}, self._run_id)
 
 
 class PixmapPieceItem(QGraphicsObject):
@@ -218,6 +221,10 @@ class XiangqiBoardView(QGraphicsView):
                 self._scene.addItem(it)
                 self._piece_items[(r, c)] = it
 
+    # 兼容你希望的命名（语义更清晰）
+    def update_all(self) -> None:
+        self.rebuild_from_model()
+
     def animate_move(self, move: Move) -> None:
         sr, sc, er, ec = move
         src = (sr, sc)
@@ -267,7 +274,8 @@ class MainWindow(QMainWindow):
         self._selected: Optional[Pos] = None
         self._selected_item: Optional[PixmapPieceItem] = None
         self._ai_thread: Optional[AIMoveThread] = None
-        self._time_limit_s = 3
+        # 用于防止“幽灵走子”：每次 reset 或启动新线程都会递增
+        self._run_id = 0
 
         self._init_window()
         self._init_ui()
@@ -291,26 +299,29 @@ class MainWindow(QMainWindow):
         # Left: board graphics
         self.board_view = XiangqiBoardView(self.controller)
         self.board_view.square_clicked.connect(self._on_square_clicked)
-        main.addWidget(self.board_view)
+        main.addWidget(self.board_view, 1)
 
         # Right: info + buttons (keep some valuable existing controls)
+        self.info_panel = QWidget()
+        self.info_panel.setMinimumWidth(250)
         right = QVBoxLayout()
-        main.addLayout(right)
+        self.info_panel.setLayout(right)
+        main.addWidget(self.info_panel, 0)
 
         self.status_label = QLabel("")
+        # 长状态文本自动换行，避免被截断/折叠
+        self.status_label.setWordWrap(True)
         right.addWidget(self.status_label)
 
-        right.addWidget(QLabel("AI 思考时间（秒）："))
-        self.time_spin = QSpinBox()
-        self.time_spin.setRange(1, 60)
-        self.time_spin.setValue(self._time_limit_s)
-        self.time_spin.valueChanged.connect(self._on_time_changed)
-        right.addWidget(self.time_spin)
-
-        self.ai_btn = QPushButton("AI 走子")
-        # 旧入口 `_maybe_start_ai_turn` 已被更通用的接力机制替代
-        self.ai_btn.clicked.connect(self.check_and_run_ai)
-        right.addWidget(self.ai_btn)
+        # GUI 实时控制台（Dashboard）
+        self.log_console = QPlainTextEdit()
+        self.log_console.setReadOnly(True)
+        self.log_console.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.log_console.setStyleSheet(
+            "QPlainTextEdit { background: #1e1e1e; color: #d4d4d4; border: 1px solid #444; }"
+        )
+        self.log_console.setFont(QFont("Consolas", 10))
+        right.addWidget(self.log_console, 1)
 
         self.reset_btn = QPushButton("重置")
         self.reset_btn.clicked.connect(self._reset_game)
@@ -318,8 +329,19 @@ class MainWindow(QMainWindow):
 
         right.addStretch(1)
 
-    def _on_time_changed(self, v: int) -> None:
-        self._time_limit_s = v
+    def append_log(self, text: str) -> None:
+        """向右侧 log_console 追加一条带时间戳的日志，并自动滚动到底部。"""
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_console.appendPlainText(f"[{ts}] {text}")
+        self.log_console.ensureCursorVisible()
+
+    def _side_name(self, color: str) -> str:
+        return "红方" if color == "red" else "黑方"
+
+    def _agent_depth_hint(self, agent) -> Optional[int]:
+        # 仅用于 UI 展示；不影响底层逻辑
+        d = getattr(agent, "depth", None)
+        return int(d) if isinstance(d, int) else None
 
     def _refresh_status(self) -> None:
         result = self.controller.current_result()
@@ -334,20 +356,39 @@ class MainWindow(QMainWindow):
             return
 
         player = result["current_player"]
-        self.status_label.setText(("红方回合" if player == "red" else "黑方回合"))
+        agent = self.controller.agent_for(player)
+        if agent is None:
+            self.status_label.setText(f"[{self._side_name(player)}] 请走棋")
+        else:
+            depth = self._agent_depth_hint(agent)
+            if depth is not None:
+                self.status_label.setText(f"[{self._side_name(player)}] AI 正在思考 (深度: {depth})...")
+            else:
+                self.status_label.setText(f"[{self._side_name(player)}] AI 正在思考...")
 
     def _reset_game(self) -> None:
-        # 不要在主线程 wait()，避免 UI 卡死；让旧线程自然结束即可
+        # 1) 安全中断当前计算：防止旧线程回调导致“幽灵走子”
+        self._run_id += 1
         if self._ai_thread and self._ai_thread.isRunning():
             self._ai_thread.requestInterruption()
-        self.controller = GameController()
-        self.board_view._controller = self.controller  # swap controller reference
-        self.board_view.rebuild_from_model()
+            try:
+                self._ai_thread.move_ready.disconnect(self._on_ai_move_ready)
+            except Exception:
+                pass
+        self._ai_thread = None
+
+        # 2) 不重建 Controller：只重置棋盘（保持 red/black agent 配置）
+        self.controller.reset_game()
+        self.board_view._controller = self.controller
+        self.board_view.update_all()
         if self._selected_item is not None:
             self._selected_item.setScale(1.0)
         self._selected = None
         self._selected_item = None
         self._refresh_status()
+        self.append_log("[UI] 重置对局（保持当前 AI 配置）")
+        # 3) 重置后立刻接力：AI vs AI 会自动开新局第一步
+        self.check_and_run_ai()
 
     def _on_square_clicked(self, row: int, col: int) -> None:
         if self.controller.is_game_over():
@@ -395,6 +436,7 @@ class MainWindow(QMainWindow):
             return
 
         print(f"[UI] player move applied: {move}")
+        self.append_log(f"[UI] 玩家落子: {move}")
         # Animate based on model coordinates; do NOT compute rules here.
         self.board_view.animate_move(move)
         self._refresh_status()
@@ -410,28 +452,52 @@ class MainWindow(QMainWindow):
         current_agent = self.controller.agent_for(self.controller.board.current_player)
         if current_agent is None:
             # 人类回合：等待点击
+            self._refresh_status()
             return
 
         # 避免重复启动线程
         if self._ai_thread and self._ai_thread.isRunning():
             return
 
-        print("[UI] 检测到 AI 回合，启动计算...")
-        self.status_label.setText("AI 思考中...")
+        side = self._side_name(self.controller.board.current_player)
+        depth = self._agent_depth_hint(current_agent)
+        if depth is not None:
+            print(f"[UI] 检测到 AI 回合（{side}，深度={depth}），启动计算...")
+            self.status_label.setText(f"[{side}] AI 正在思考 (深度: {depth})...")
+            self.append_log(f"[UI] 检测到 AI 回合 ({side})，开始计算...")
+        else:
+            print(f"[UI] 检测到 AI 回合（{side}），启动计算...")
+            self.status_label.setText(f"[{side}] AI 正在思考...")
+            self.append_log(f"[UI] 检测到 AI 回合 ({side})，开始计算...")
 
         board_snapshot = self.controller.board.copy()
         ai_color = self.controller.board.current_player
+        run_id = self._run_id
         self._ai_thread = AIMoveThread(
             ai=current_agent,
             board_snapshot=board_snapshot,
             ai_color=ai_color,
-            time_limit_s=self._time_limit_s,
+            # 不再暴露 UI 控件；这里保留一个温和的固定上限，避免极端卡死
+            time_limit_s=10,
+            run_id=run_id,
         )
         self._ai_thread.move_ready.connect(self._on_ai_move_ready)
         self._ai_thread.start()
 
-    def _on_ai_move_ready(self, move: Optional[Move]) -> None:
+    def _on_ai_move_ready(self, move: Optional[Move], stats: Optional[dict], run_id: int) -> None:
+        # 如果这是旧局/旧线程的回调，直接忽略
+        if run_id != self._run_id:
+            return
         print(f"[UI] AI move signal received: {move}")
+        if stats:
+            depth = stats.get("depth", "?")
+            time_taken = stats.get("time_taken", "?")
+            nodes = stats.get("nodes_evaluated", "?")
+            self.append_log("本次搜索深度: " + str(depth))
+            self.append_log("搜索耗时 (秒): " + (f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)))
+            self.append_log("评估的节点总数: " + str(nodes))
+        self.append_log("[UI] AI 信号接收完成，执行落子。")
+        self.append_log("--------------------------")
         if move:
             self.controller.apply_move(move, player=self.controller.board.current_player)
             self.board_view.animate_move(move)
@@ -439,8 +505,8 @@ class MainWindow(QMainWindow):
             # AI 无合法走法（困毙/将死由 Rules.winner 判定）
             pass
         self._refresh_status()
-        # 两个 AI 对弈时避免过快：延迟 0.5 秒再触发下一步
-        QTimer.singleShot(500, self.check_and_run_ai)
+        # 极速接力：本方落子后立刻轮到下一方计算
+        self.check_and_run_ai()
 
 
 if __name__ == "__main__":

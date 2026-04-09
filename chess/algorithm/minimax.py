@@ -7,7 +7,7 @@ and API updates (Board.make_move -> Board.apply_move, Board.*rules -> Rules.*).
 from __future__ import annotations
 
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 
 from chess.model.rules import Rules
 
@@ -19,6 +19,8 @@ class MinimaxAI:
         # Minimax搜索的深度限制。
         self.depth = depth
         self._nodes = 0
+        # 供 GUI Dashboard/日志读取的最近一次搜索统计
+        self.last_stats: Dict[str, Any] = {}
 
     def choose_move(self, board, time_limit: Optional[float] = 10.0) -> Optional[Tuple[int, int, int, int]]:
         """Searcher 接口：为当前 board.current_player 选择一步。"""
@@ -62,6 +64,11 @@ class MinimaxAI:
                     best_move = move
 
         elapsed = time.time() - start
+        self.last_stats = {
+            "depth": int(self.depth),
+            "time_taken": float(elapsed),
+            "nodes_evaluated": int(self._nodes),
+        }
         print(f"本次搜索深度: {self.depth}")
         print(f"搜索耗时 (秒): {elapsed:.3f}")
         print(f"评估的节点总数: {self._nodes}")
