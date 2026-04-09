@@ -26,8 +26,9 @@ if __name__ == "__main__":
         default="human",
         help="红方类型（默认 human）",
     )
-    # Minimax 搜索深度
-    parser.add_argument("--depth", type=int, default=3, help="Minimax 搜索深度（默认 3）")
+    # Minimax 搜索深度（红黑独立配置，便于不同强度对战）
+    parser.add_argument("--red-depth", type=int, default=3, help="红方 Minimax 搜索深度（默认 3）")
+    parser.add_argument("--black-depth", type=int, default=3, help="黑方 Minimax 搜索深度（默认 3）")
 
     args = parser.parse_args()
 
@@ -35,17 +36,34 @@ if __name__ == "__main__":
     from chess.algorithm.random_ai import RandomAI
     from chess.algorithm.minimax import MinimaxAI
 
-    def build_agent(name: str):
+    def build_agent(name: str, *, depth: int):
         if name == "human":
             return None
         if name == "random":
             return RandomAI()
         if name == "minimax":
-            return MinimaxAI(depth=args.depth)
+            return MinimaxAI(depth=depth)
         raise ValueError(f"Unknown agent: {name}")
 
-    red_agent = build_agent(args.red_ai)
-    black_agent = build_agent(args.black_ai)
+    red_agent = build_agent(args.red_ai, depth=args.red_depth)
+    black_agent = build_agent(args.black_ai, depth=args.black_depth)
+
+    # 启动前打印明确配置，便于实验记录与对比
+    def side_desc(side: str, ai_name: str, depth: int) -> str:
+        if ai_name == "human":
+            return f"{side}: Human"
+        if ai_name == "random":
+            return f"{side}: RandomAI"
+        if ai_name == "minimax":
+            return f"{side}: Minimax (深度:{depth})"
+        return f"{side}: {ai_name}"
+
+    print(
+        "[System] "
+        + side_desc("红方", args.red_ai, args.red_depth)
+        + " vs "
+        + side_desc("黑方", args.black_ai, args.black_depth)
+    )
 
     controller = GameController(red_agent=red_agent, black_agent=black_agent)
 
