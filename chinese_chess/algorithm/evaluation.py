@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from chinese_chess.model.rules import Rules
+
 
 class Evaluation:
     # 可参与将杀/实质性进攻的子力（仅剩将、士、象视为无法将死 → 评估为和）
@@ -123,6 +125,11 @@ class Evaluation:
             base = float(pv.get(piece.piece_type, 0))
             pst = pst_map.get(piece.piece_type, Evaluation.PST_DEFAULT)
             red_score += base + float(pst[r][c])
+            if piece.piece_type == "bing" and r <= 4:
+                # 过河兵：每深入对方阵地一行 +20（原约 +10 量级，现加倍强化推进）
+                red_score += float((4 - r) * 20)
+            if piece.piece_type == "che" and r <= 1:
+                red_score += 30.0
 
         for r, c in board.active_pieces.get("black", ()):
             piece = b[r][c]
@@ -132,10 +139,16 @@ class Evaluation:
             pst = pst_map.get(piece.piece_type, Evaluation.PST_DEFAULT)
             # 黑方 PST 以红方视角镜像行
             black_score += base + float(pst[9 - r][c])
+            if piece.piece_type == "bing" and r >= 5:
+                black_score += float((r - 5) * 20)
+            if piece.piece_type == "che" and r >= 8:
+                black_score += 30.0
 
         # 不再在评估里调用 get_all_moves（原“机动性”项会对每个叶子节点做两次全量走法生成，
         # 往往占搜索总耗时的大部分；子力+PST 已足够支撑 Minimax 实验对比。）
+        opp = "black" if board.current_player == "red" else "red"
+        check_bonus = 15.0 if Rules.is_king_in_check(board, opp) else 0.0
         if board.current_player == "red":
-            return red_score - black_score
-        return black_score - red_score
+            return red_score - black_score + check_bonus
+        return black_score - red_score + check_bonus
 

@@ -25,6 +25,10 @@ _CAPTURE_SORT_BIAS = 10000
 # 杀手走法排序权重（低于吃子基线 10000，高于普通走子 0）
 _KILLER_PRIMARY_BONUS = 5000
 _KILLER_SECONDARY_BONUS = 4000
+# 置换表着法排序分（须高于历史+吃子+杀手之和）
+_TT_MOVE_SORT_SCORE = 1_000_000
+# 排序键中历史分量上限，避免累计过大压过 TT
+_HISTORY_SORT_CAP = 500_000
 
 # 杀手表按「当前 _alphabeta 的剩余深度 depth」索引；与常见深度上界对齐
 MAX_KILLER_DEPTH = 10
@@ -39,8 +43,8 @@ class MinimaxAI:
         self,
         depth=3,
         stochastic: bool = False,
-        top_k: int = 3,
-        tolerance: int = 20,
+        top_k: int = 2,
+        tolerance: int = 5,
         verbose: bool = True,
     ):
         # Minimax搜索的深度限制。
@@ -70,6 +74,8 @@ class MinimaxAI:
         self.start_time: float = 0.0
         # 重复局面检测：保存“从根到当前节点”的 zobrist_hash 路径（可叠加外部 game_history）
         self.history_hashes: List[int] = []
+        # 历史启发：beta 剪枝着法加权，跨着法积累（与 TT 不同，不在每步根搜索清空）
+        self.history_table: Dict[Tuple[int, int, int, int], int] = {}
 
     def reset_benchmark_stats(self) -> None:
         """清零基准统计（每局对弈开始前调用）。"""
@@ -173,10 +179,9 @@ class MinimaxAI:
     def order_moves(
         self, board, moves: List[Tuple[int, int, int, int]], depth: int
     ) -> None:
-        """MVV-LVA + 杀手走法启发式，原地按优先级降序排列。
+        """排序键（高优先）：TT 着法 > 历史启发 > MVV-LVA 吃子 > 杀手 > 其余。
 
-        吃子：``_CAPTURE_SORT_BIAS + victim - attacker``（同 Evaluation.PIECE_VALUES）。
-        非吃子但若命中 ``killer_moves[depth]``：slot0 +5000，slot1 +4000。
+        历史分量 capped，保证恒低于 ``_TT_MOVE_SORT_SCORE``。
         """
         pv = Evaluation.PIECE_VALUES
         ki = self._killer_index(depth)
@@ -187,16 +192,18 @@ class MinimaxAI:
 
         def move_score(m: Tuple[int, int, int, int]) -> int:
             if tt_move is not None and m == tt_move:
-                return 1_000_000_000
+                return _TT_MOVE_SORT_SCORE
+            hist = min(self.history_table.get(m, 0), _HISTORY_SORT_CAP)
             sr, sc, er, ec = m
             victim = board.get_piece(er, ec)
             if victim is None:
-                score = 0
+                cap = 0
             else:
                 attacker = board.get_piece(sr, sc)
                 victim_value = int(pv.get(victim.piece_type, 0))
                 attacker_value = int(pv.get(attacker.piece_type, 0)) if attacker else 0
-                score = _CAPTURE_SORT_BIAS + victim_value - attacker_value
+                cap = _CAPTURE_SORT_BIAS + victim_value - attacker_value
+            score = hist + cap
             if m == k0:
                 score += _KILLER_PRIMARY_BONUS
             elif m == k1:
@@ -508,6 +515,7 @@ class MinimaxAI:
             if best > alpha:
                 alpha = best
             if alpha >= beta:
+                self.history_table[move] = self.history_table.get(move, 0) + depth * depth
                 if not is_cap:
                     self._push_killer(depth, move)
                 break
