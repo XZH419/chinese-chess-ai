@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from typing import Iterator, Tuple
+from typing import Iterator, Optional, Tuple
 
 from .board import Board
 
@@ -593,9 +593,24 @@ class Rules:
         return None
 
     @staticmethod
-    def is_game_over(board: Board):
+    def is_threefold_repetition_draw(board: Board, position_history: list) -> bool:
+        """同一局面（Zobrist）在局面链中出现至少 3 次时判和（简易防循环）。"""
+        if not position_history:
+            return False
+        h = board.zobrist_hash
+        return sum(1 for x in position_history if x == h) >= 3
+
+    @staticmethod
+    def is_game_over(board: Board, position_history: Optional[list] = None):
         # 游戏结束条件：
         # - 任意一方将/帅被吃
         # - 轮到走子的一方无合法走法（困毙/将死）
-        return Rules.winner(board) is not None
+        # - 可选：三次重复局面判和
+        if Rules.winner(board) is not None:
+            return True
+        if position_history is not None and Rules.is_threefold_repetition_draw(
+            board, position_history
+        ):
+            return True
+        return False
 

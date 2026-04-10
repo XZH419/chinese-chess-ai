@@ -70,7 +70,15 @@ class AIMoveThread(QThread):
 
     move_ready = pyqtSignal(object, object, int)  # (Move|None, stats:dict|None, run_id)
 
-    def __init__(self, ai, board_snapshot, ai_color: str, time_limit_s: int, run_id: int):
+    def __init__(
+        self,
+        ai,
+        board_snapshot,
+        ai_color: str,
+        time_limit_s: int,
+        run_id: int,
+        game_history_hashes: Optional[list] = None,
+    ):
         super().__init__()
         # 线程中绝对不持有任何 UI / controller 对象，避免隐式触碰主线程资源
         self._ai = ai
@@ -78,6 +86,7 @@ class AIMoveThread(QThread):
         self._ai_color = ai_color
         self._time_limit_s = time_limit_s
         self._run_id = run_id
+        self._game_history_hashes = list(game_history_hashes) if game_history_hashes else []
 
     def run(self) -> None:
         # 仅在纯数据上计算走法：board_snapshot / ai
@@ -85,10 +94,18 @@ class AIMoveThread(QThread):
         try:
             if hasattr(self._ai, "choose_move"):
                 self._board.current_player = self._ai_color
-                move = self._ai.choose_move(self._board, time_limit=self._time_limit_s)
+                move = self._ai.choose_move(
+                    self._board,
+                    time_limit=self._time_limit_s,
+                    game_history=self._game_history_hashes,
+                )
             else:
                 self._board.current_player = self._ai_color
-                move = self._ai.get_best_move(self._board, time_limit=self._time_limit_s)
+                move = self._ai.get_best_move(
+                    self._board,
+                    time_limit=self._time_limit_s,
+                    game_history=self._game_history_hashes,
+                )
             print("[AI Thread] finished, emitting signal")
             stats = getattr(self._ai, "last_stats", None)
             self.move_ready.emit(move, stats, self._run_id)
@@ -476,6 +493,7 @@ class MainWindow(QMainWindow):
         board_snapshot = self.controller.board.copy()
         ai_color = self.controller.board.current_player
         run_id = self._run_id
+        game_hist = list(self.controller.game_history_hashes)
         self._ai_thread = AIMoveThread(
             ai=current_agent,
             board_snapshot=board_snapshot,
@@ -483,6 +501,7 @@ class MainWindow(QMainWindow):
             # 不再暴露 UI 控件；这里保留一个温和的固定上限，避免极端卡死
             time_limit_s=10,
             run_id=run_id,
+            game_history_hashes=game_hist,
         )
         self._ai_thread.move_ready.connect(self._on_ai_move_ready)
         self._ai_thread.start()

@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 
 class Evaluation:
     # 基础子力价值（单位分）
@@ -83,24 +81,20 @@ class Evaluation:
     }
 
     @staticmethod
-    def evaluate(board, is_maximizing_player: bool = True, maximizing_color: Optional[str] = None) -> float:
-        """评估函数。
+    def evaluate(board) -> float:
+        """评估函数（纯 Negamax 版）。
 
-        - 基础分以“红方视角”计算：score = red - black
-        - 若指定 maximizing_color，则返回其视角分数：
-          - maximizing_color == 'red' -> 返回 score
-          - maximizing_color == 'black' -> 返回 -score
-        - 否则按 is_maximizing_player 返回：
-          - True  -> 返回 score
-          - False -> 返回 -score
+        永远返回“当前即将行棋方（board.current_player）”的视角分数：
+        - 轮到红方走：return red_score - black_score
+        - 轮到黑方走：return black_score - red_score
         """
 
         b = board.board
         pv = Evaluation.PIECE_VALUES
         pst_map = Evaluation.PST_MAP
 
-        red_total = 0.0
-        black_total = 0.0
+        red_score = 0.0
+        black_score = 0.0
 
         # 直接遍历 active_pieces，避免 90 格全盘扫描
         for r, c in board.active_pieces.get("red", ()):
@@ -109,7 +103,7 @@ class Evaluation:
                 continue
             base = float(pv.get(piece.piece_type, 0))
             pst = pst_map.get(piece.piece_type, Evaluation.PST_DEFAULT)
-            red_total += base + float(pst[r][c])
+            red_score += base + float(pst[r][c])
 
         for r, c in board.active_pieces.get("black", ()):
             piece = b[r][c]
@@ -118,14 +112,11 @@ class Evaluation:
             base = float(pv.get(piece.piece_type, 0))
             pst = pst_map.get(piece.piece_type, Evaluation.PST_DEFAULT)
             # 黑方 PST 以红方视角镜像行
-            black_total += base + float(pst[9 - r][c])
-
-        score = red_total - black_total
+            black_score += base + float(pst[9 - r][c])
 
         # 不再在评估里调用 get_all_moves（原“机动性”项会对每个叶子节点做两次全量走法生成，
         # 往往占搜索总耗时的大部分；子力+PST 已足够支撑 Minimax 实验对比。）
-
-        if maximizing_color is not None:
-            return score if maximizing_color == "red" else -score
-        return score if is_maximizing_player else -score
+        if board.current_player == "red":
+            return red_score - black_score
+        return black_score - red_score
 

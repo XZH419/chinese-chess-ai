@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from chinese_chess.model import zobrist
 from chinese_chess.model.rules import Rules
 
 from .evaluation import Evaluation
@@ -50,7 +51,8 @@ class MinimaxAI:
         ] = {}
         # 仅供搜索期间使用的上下文（避免每层层层传递）
         self.start_time: float = 0.0
-        self.maximizing_color: str = "red"
+        # 重复局面检测：保存“从根到当前节点”的 zobrist_hash 路径（可叠加外部 game_history）
+        self.history_hashes: List[int] = []
 
     def _tt_probe(self, key: int, depth: int, alpha: float, beta: float) -> Optional[float]:
         entry = self.transposition_table.get(key)
@@ -164,12 +166,22 @@ class MinimaxAI:
 
         moves.sort(key=move_score, reverse=True)
 
-    def choose_move(self, board, time_limit: Optional[float] = 10.0) -> Optional[Tuple[int, int, int, int]]:
+    def choose_move(
+        self,
+        board,
+        time_limit: Optional[float] = 10.0,
+        game_history: Optional[List[int]] = None,
+    ) -> Optional[Tuple[int, int, int, int]]:
         """Searcher 接口：为当前 board.current_player 选择一步。"""
-        return self.get_best_move(board, time_limit=time_limit)
+        return self.get_best_move(board, game_history=game_history, time_limit=time_limit)
 
-    def get_best_move(self, board, time_limit: Optional[float] = 10.0):
-        """在允许时间内选择最优走法（Alpha-Beta Minimax + Iterative Deepening）。"""
+    def get_best_move(
+        self,
+        board,
+        game_history: Optional[List[int]] = None,
+        time_limit: Optional[float] = 10.0,
+    ):
+        """在允许时间内选择最优走法（Negamax + Iterative Deepening）。"""
         self.start_time = time.time()
         self._nodes = 0
         self._tt_hits = 0
@@ -177,16 +189,19 @@ class MinimaxAI:
         self.transposition_table.clear()
         self._reset_killers()
 
-        self.maximizing_color = board.current_player
-        maximizing = self.maximizing_color == "red"  # 评估函数基础分为 red-black
+        # 外部可传入从开局到当前局面的完整哈希链；若末尾已是当前局面则不再重复追加
+        self.history_hashes = list(game_history) if game_history else []
+        if not self.history_hashes or self.history_hashes[-1] != board.zobrist_hash:
+            self.history_hashes.append(board.zobrist_hash)
+
         global_best_move: Optional[Tuple[int, int, int, int]] = None
 
         try:
             for current_depth in range(1, self.depth + 1):
-                moves = list(Rules.get_pseudo_legal_moves(board, self.maximizing_color))
+                moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
                 self.order_moves(board, moves, current_depth)
 
-                best_score = float("-inf") if maximizing else float("inf")
+                best_score = float("-inf")
                 current_best_move: Optional[Tuple[int, int, int, int]] = None
                 any_legal = False
 
@@ -196,33 +211,31 @@ class MinimaxAI:
 
                     mover = board.current_player
                     captured = board.apply_move(*move)
+                    self.history_hashes.append(board.zobrist_hash)
 
                     # 延迟合法性校验（防送将/白脸将）
                     if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
+                        self.history_hashes.pop()
                         board.undo_move(*move, captured)
                         continue
 
                     any_legal = True
-                    score = self._alphabeta(
-                        board=board,
-                        depth=current_depth - 1,
-                        alpha=float("-inf"),
-                        beta=float("inf"),
-                        maximizing=not maximizing,
-                        start_time=self.start_time,
-                        time_limit=time_limit,
-                        maximizing_color=self.maximizing_color,
-                    )
-                    board.undo_move(*move, captured)
+                    try:
+                        score = -self._alphabeta(
+                            board,
+                            current_depth - 1,
+                            float("-inf"),
+                            float("inf"),
+                            self.start_time,
+                            time_limit,
+                        )
+                    finally:
+                        self.history_hashes.pop()
+                        board.undo_move(*move, captured)
 
-                    if maximizing:
-                        if score > best_score:
-                            best_score = score
-                            current_best_move = move
-                    else:
-                        if score < best_score:
-                            best_score = score
-                            current_best_move = move
+                    if score > best_score:
+                        best_score = score
+                        current_best_move = move
 
                 if not any_legal:
                     break  # 根节点无路可走：被将死/困毙
@@ -253,55 +266,59 @@ class MinimaxAI:
         board,
         alpha: float,
         beta: float,
-        maximizing_color: str,
         depth_limit: int = 4,
     ) -> float:
         """静止搜索（Quiescence Search, QS）：仅扩展吃子走法，缓解水平线效应。
 
-        返回值与 `_alphabeta` 保持一致：始终是 `maximizing_color` 视角分数。
+        返回值与 `_alphabeta` 一致：当前行棋方视角，分越高越好。
         """
-        def q(alpha_n: float, beta_n: float, limit: int) -> float:
-            if limit <= 0:
-                self._nodes += 1
-                sign0 = 1 if board.current_player == maximizing_color else -1
-                return Evaluation.evaluate(board, maximizing_color=maximizing_color) * sign0
+        if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
+            return 0.0
 
+        if depth_limit <= 0:
             self._nodes += 1
-            sign0 = 1 if board.current_player == maximizing_color else -1
-            stand_pat = Evaluation.evaluate(board, maximizing_color=maximizing_color) * sign0
-            if stand_pat >= beta_n:
-                return beta_n
-            if stand_pat > alpha_n:
-                alpha_n = stand_pat
+            return Evaluation.evaluate(board)
 
-            moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
-            captures = [m for m in moves if board.board[m[2]][m[3]] is not None]
-            if not captures:
-                return alpha_n
+        self._nodes += 1
+        alpha_bound = alpha
+        stand_pat = Evaluation.evaluate(board)
+        if stand_pat >= beta:
+            return beta
+        if stand_pat > alpha:
+            alpha = stand_pat
 
-            # MVV-LVA + killer（killer 在 QS 中影响小，但排序本身很关键）
-            self.order_moves(board, captures, limit)
+        moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
+        captures = [m for m in moves if board.board[m[2]][m[3]] is not None]
+        if not captures:
+            return alpha
 
-            for move in captures:
-                mover = board.current_player
-                captured = board.apply_move(*move)
-                if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
-                    board.undo_move(*move, captured)
-                    continue
+        self.order_moves(board, captures, depth_limit)
 
-                score = -q(-beta_n, -alpha_n, limit - 1)
+        DELTA_MARGIN = 900 + 200
+        if stand_pat + DELTA_MARGIN < alpha_bound:
+            return alpha_bound
+
+        for move in captures:
+            mover = board.current_player
+            captured = board.apply_move(*move)
+            self.history_hashes.append(board.zobrist_hash)
+            if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
+                self.history_hashes.pop()
+                board.undo_move(*move, captured)
+                continue
+
+            try:
+                score = -self._quiescence_search(board, -beta, -alpha, depth_limit - 1)
+            finally:
+                self.history_hashes.pop()
                 board.undo_move(*move, captured)
 
-                if score >= beta_n:
-                    return beta_n
-                if score > alpha_n:
-                    alpha_n = score
+            if score >= beta:
+                return beta
+            if score > alpha:
+                alpha = score
 
-            return alpha_n
-
-        sign = 1 if board.current_player == maximizing_color else -1
-        best_side = q(alpha * sign, beta * sign, depth_limit)
-        return float(best_side * sign)
+        return alpha
 
     def _alphabeta(
         self,
@@ -309,114 +326,109 @@ class MinimaxAI:
         depth: int,
         alpha: float,
         beta: float,
-        maximizing: bool,
         start_time: float,
         time_limit: Optional[float],
-        maximizing_color: str,
+        *,
+        allow_null: bool = True,
+        use_tt: bool = True,
     ) -> float:
-        """标准 Alpha-Beta 剪枝递归。"""
+        """Negamax Alpha-Beta（当前行棋方视角，分越高越好）。"""
+        if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
+            return 0.0
         if time_limit is not None and (time.time() - start_time) > time_limit:
             raise SearchTimeoutException()
 
         alpha_orig, beta_orig = alpha, beta
         pos_key = board.zobrist_hash
-        tt_hit = self._tt_probe(pos_key, depth, alpha, beta)
-        if tt_hit is not None:
-            self._tt_hits += 1
-            return tt_hit
-
-        if depth == 0:
-            return self._quiescence_search(
-                board=board,
-                alpha=alpha,
-                beta=beta,
-                maximizing_color=maximizing_color,
-            )
+        if use_tt:
+            tt_hit = self._tt_probe(pos_key, depth, alpha, beta)
+            if tt_hit is not None:
+                self._tt_hits += 1
+                return tt_hit
 
         player = board.current_player
-        moves = list(Rules.get_pseudo_legal_moves(board, player))
+        if allow_null and depth >= 3 and not Rules.is_king_in_check(board, player):
+            R = 2
+            reduced_depth = depth - 1 - R
+            if reduced_depth < 0:
+                reduced_depth = 0
+            saved_player = board.current_player
+            saved_hash = board.zobrist_hash
+            board.current_player = "black" if saved_player == "red" else "red"
+            board.zobrist_hash = saved_hash ^ zobrist.BLACK_TO_MOVE
+            try:
+                null_score = -self._alphabeta(
+                    board,
+                    reduced_depth,
+                    -beta,
+                    -beta + 1,
+                    start_time,
+                    time_limit,
+                    allow_null=False,
+                    use_tt=False,
+                )
+            finally:
+                board.current_player = saved_player
+                board.zobrist_hash = saved_hash
+            if null_score >= beta:
+                return beta
+
+        if depth == 0:
+            return self._quiescence_search(board, alpha, beta)
+
+        moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
         self.order_moves(board, moves, depth)
 
-        if maximizing:
-            value = float("-inf")
-            any_legal = False
-            best_move = None
-            for move in moves:
-                if time_limit is not None and (time.time() - start_time) > time_limit:
-                    raise SearchTimeoutException()
-                is_cap = self._is_capture(board, move)
-                mover = board.current_player
-                captured = board.apply_move(*move)
-                if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
-                    board.undo_move(*move, captured)
-                    continue
-                any_legal = True
-                child = self._alphabeta(
-                    board=board,
-                    depth=depth - 1,
-                    alpha=alpha,
-                    beta=beta,
-                    maximizing=False,
-                    start_time=start_time,
-                    time_limit=time_limit,
-                    maximizing_color=maximizing_color,
-                )
+        best = float("-inf")
+        best_move = None
+        any_legal = False
+
+        for move in moves:
+            if time_limit is not None and (time.time() - start_time) > time_limit:
+                raise SearchTimeoutException()
+            is_cap = self._is_capture(board, move)
+            mover = board.current_player
+            captured = board.apply_move(*move)
+            self.history_hashes.append(board.zobrist_hash)
+            if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
+                self.history_hashes.pop()
                 board.undo_move(*move, captured)
-                if child > value:
-                    value = child
-                    best_move = move
-                alpha = max(alpha, value)
-                if beta <= alpha:
-                    if not is_cap:
-                        self._push_killer(depth, move)
-                    break
-            if not any_legal:
-                self._nodes += 1
-                sign = 1 if board.current_player == maximizing_color else -1
-                mate_score = float(sign * (-10000 + (self.depth - depth)))
-                self._tt_store_exact(pos_key, depth, mate_score, None)
-                return mate_score
-            self._tt_store(pos_key, depth, value, alpha_orig, beta_orig, best_move)
-            return value
-        else:
-            value = float("inf")
-            any_legal = False
-            best_move = None
-            for move in moves:
-                if time_limit is not None and (time.time() - start_time) > time_limit:
-                    raise SearchTimeoutException()
-                is_cap = self._is_capture(board, move)
-                mover = board.current_player
-                captured = board.apply_move(*move)
-                if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
-                    board.undo_move(*move, captured)
-                    continue
-                any_legal = True
-                child = self._alphabeta(
-                    board=board,
-                    depth=depth - 1,
-                    alpha=alpha,
-                    beta=beta,
-                    maximizing=True,
-                    start_time=start_time,
-                    time_limit=time_limit,
-                    maximizing_color=maximizing_color,
+                continue
+            any_legal = True
+
+            try:
+                score = -self._alphabeta(
+                    board,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    start_time,
+                    time_limit,
+                    allow_null=allow_null,
+                    use_tt=use_tt,
                 )
+            finally:
+                self.history_hashes.pop()
                 board.undo_move(*move, captured)
-                if child < value:
-                    value = child
-                    best_move = move
-                beta = min(beta, value)
-                if beta <= alpha:
-                    if not is_cap:
-                        self._push_killer(depth, move)
-                    break
-            if not any_legal:
-                self._nodes += 1
-                sign = 1 if board.current_player == maximizing_color else -1
-                mate_score = float(sign * (-10000 + (self.depth - depth)))
+
+            if score > best:
+                best = score
+                best_move = move
+            if best > alpha:
+                alpha = best
+            if alpha >= beta:
+                if not is_cap:
+                    self._push_killer(depth, move)
+                break
+
+        if not any_legal:
+            self._nodes += 1
+            mate_score = float(-10000 + (self.depth - depth))
+            if use_tt:
                 self._tt_store_exact(pos_key, depth, mate_score, None)
-                return mate_score
-            self._tt_store(pos_key, depth, value, alpha_orig, beta_orig, best_move)
-            return value
+            return mate_score
+
+        if use_tt:
+            self._tt_store(pos_key, depth, best, alpha_orig, beta_orig, best_move)
+        return best
 

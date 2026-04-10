@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Any
+from typing import Any, List, Optional, Tuple
 
 from chinese_chess.model.board import Board
 from chinese_chess.model.rules import Rules
@@ -17,16 +17,16 @@ from chinese_chess.algorithm.minimax import MinimaxAI
 class AgentProtocol:
     """AI 接口协议（无需继承，仅做鸭子类型约定）。
 
-    支持两种方法之一：
-    - choose_move(board, time_limit=...) -> move | None
-    - get_best_move(board, time_limit=...) -> move | None
+    支持两种方法之一（可选传入 game_history：开局至当前的 zobrist_hash 列表）：
+    - choose_move(board, time_limit=..., game_history=...) -> move | None
+    - get_best_move(board, time_limit=..., game_history=...) -> move | None
     """
 
     # 这里只用于类型提示，不做强制运行时检查
-    def choose_move(self, board: Board, time_limit: Optional[float] = None):  # pragma: no cover
+    def choose_move(self, board: Board, time_limit: Optional[float] = None, **kwargs):  # pragma: no cover
         raise NotImplementedError
 
-    def get_best_move(self, board: Board, time_limit: Optional[float] = None):  # pragma: no cover
+    def get_best_move(self, board: Board, time_limit: Optional[float] = None, **kwargs):  # pragma: no cover
         raise NotImplementedError
 
 
@@ -52,6 +52,9 @@ class GameController:
         # agent 为 None 表示该方是人类（由 GUI 点击驱动）
         self.red_agent = red_agent
         self.black_agent = black_agent
+
+        # 全局对局 Zobrist 局面链（含当前盘面），供 Minimax 重复局面检测与规则判和
+        self.game_history_hashes: List[int] = [self.board.zobrist_hash]
 
         # 默认行为：若未指定 black_agent，则用 Minimax(depth=3) 作为黑方 AI
         if self.black_agent is None:
@@ -79,14 +82,17 @@ class GameController:
         if not Rules.is_valid_move(self.board, sr, sc, er, ec, player=player):
             return MoveOutcome(ok=False, message="illegal move")
         captured = self.board.apply_move(sr, sc, er, ec)
+        self.game_history_hashes.append(self.board.zobrist_hash)
         return MoveOutcome(ok=True, captured=captured)
 
     def undo_move(self, move: Tuple[int, int, int, int], captured) -> None:
         sr, sc, er, ec = move
         self.board.undo_move(sr, sc, er, ec, captured)
+        if len(self.game_history_hashes) > 1:
+            self.game_history_hashes.pop()
 
     def is_game_over(self) -> bool:
-        return Rules.is_game_over(self.board)
+        return Rules.is_game_over(self.board, position_history=self.game_history_hashes)
 
     def winner(self) -> Optional[str]:
         """返回胜者颜色字符串：'red'/'black'/None。"""
@@ -111,6 +117,7 @@ class GameController:
         """
 
         self.board = Board()
+        self.game_history_hashes = [self.board.zobrist_hash]
 
     def maybe_play_ai_turn(self, time_limit: float = 5.0) -> MoveOutcome:
         """若轮到 AI，则让对应 agent 走一步；否则返回 ok=False。
@@ -126,10 +133,11 @@ class GameController:
         if agent is None:
             return MoveOutcome(ok=False, message="human turn")
 
+        gh = list(self.game_history_hashes)
         if hasattr(agent, "choose_move"):
-            move = agent.choose_move(self.board, time_limit=time_limit)
+            move = agent.choose_move(self.board, time_limit=time_limit, game_history=gh)
         else:
-            move = agent.get_best_move(self.board, time_limit=time_limit)
+            move = agent.get_best_move(self.board, time_limit=time_limit, game_history=gh)
         if move is None:
             # 无合法走法：困毙/将死，胜负由 Rules.winner 判定
             return MoveOutcome(ok=False, message="ai has no legal moves")

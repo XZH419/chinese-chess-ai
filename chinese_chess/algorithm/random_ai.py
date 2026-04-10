@@ -22,7 +22,7 @@ class RandomAI:
         self.last_stats = {}
 
     # Searcher-style API (recommended)
-    def choose_move(self, board, time_limit: Optional[float] = None) -> Optional[Tuple[int, int, int, int]]:
+    def choose_move(self, board, time_limit: Optional[float] = None, **kwargs) -> Optional[Tuple[int, int, int, int]]:
         self.last_stats = {"depth": 0, "time_taken": 0.0, "nodes_evaluated": 0}
         moves = Rules.get_legal_moves(board, board.current_player)
         if not moves:
@@ -30,6 +30,6 @@ class RandomAI:
         return self._rng.choice(list(moves))
 
     # Compatibility with existing AI API in this repo
-    def get_best_move(self, board, time_limit: Optional[float] = None) -> Optional[Tuple[int, int, int, int]]:
+    def get_best_move(self, board, time_limit: Optional[float] = None, **kwargs) -> Optional[Tuple[int, int, int, int]]:
         return self.choose_move(board, time_limit=time_limit)
 
