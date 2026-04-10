@@ -2,7 +2,7 @@
 
 本文件从旧实现 `chinese-chess/ai/board.py` “物理搬运”而来，职责是：
 - **所有规则判定**：每个棋子的走法合法性、将军判定、将帅对面（白脸将）判定
-- **走法生成**：get_all_moves / get_legal_moves
+- **走法生成**：get_all_moves / get_legal_moves / get_pseudo_legal_moves（AI 伪合法）
 - **终局判定**：将被吃掉、无子可走（困毙/将死）
 
 注意：
@@ -10,6 +10,8 @@
 """
 
 from __future__ import annotations
+
+from typing import Iterator, Tuple
 
 from .board import Board
 
@@ -34,16 +36,20 @@ class Rules:
         """
 
         player = player or board.current_player
-        if not board._inside_board(start_row, start_col) or not board._inside_board(
-            end_row, end_col
+        if not (
+            0 <= start_row < 10
+            and 0 <= start_col < 9
+            and 0 <= end_row < 10
+            and 0 <= end_col < 9
         ):
             return False
 
-        piece = board.get_piece(start_row, start_col)
+        b = board.board
+        piece = b[start_row][start_col]
         if not piece or piece.color != player:
             return False
 
-        target = board.get_piece(end_row, end_col)
+        target = b[end_row][end_col]
         if target and target.color == piece.color:
             return False
 
@@ -122,7 +128,7 @@ class Rules:
             return False
         eye_r = (sr + er) // 2
         eye_c = (sc + ec) // 2
-        if board.get_piece(eye_r, eye_c):
+        if board.board[eye_r][eye_c]:
             return False
         if player == "red":
             return er >= 5
@@ -143,7 +149,7 @@ class Rules:
         else:
             leg_r = sr
             leg_c = (sc + ec) // 2
-        if board.get_piece(leg_r, leg_c):
+        if board.board[leg_r][leg_c]:
             return False
         return True
 
@@ -152,15 +158,16 @@ class Rules:
         # 车直线移动，路径上不能有阻挡棋子。
         if sr != er and sc != ec:
             return False
+        b = board.board
         if sr == er:
             step = 1 if ec > sc else -1
             for c in range(sc + step, ec, step):
-                if board.get_piece(sr, c):
+                if b[sr][c]:
                     return False
         else:
             step = 1 if er > sr else -1
             for r in range(sr + step, er, step):
-                if board.get_piece(r, sc):
+                if b[r][sc]:
                     return False
         return True
 
@@ -171,17 +178,18 @@ class Rules:
         # - 吃子：直线走，且中间必须**恰好隔一个子（炮架）**
         if sr != er and sc != ec:
             return False
-        target = board.get_piece(er, ec)
+        b = board.board
+        target = b[er][ec]
         count = 0
         if sr == er:
             step = 1 if ec > sc else -1
             for c in range(sc + step, ec, step):
-                if board.get_piece(sr, c):
+                if b[sr][c]:
                     count += 1
         else:
             step = 1 if er > sr else -1
             for r in range(sr + step, er, step):
-                if board.get_piece(r, sc):
+                if b[r][sc]:
                     count += 1
         if target:
             return count == 1
@@ -255,7 +263,7 @@ class Rules:
         cand = []
 
         def add(rr, cc):
-            if board._inside_board(rr, cc):
+            if 0 <= rr < 10 and 0 <= cc < 9:
                 cand.append((rr, cc))
 
         if piece_type == "jiang":
@@ -290,7 +298,7 @@ class Rules:
             # 车/炮：四个方向一直走到边界；炮的“隔子吃”由 is_valid_move 内部处理
             for dr, dc in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
                 rr, cc = r + dr, c + dc
-                while board._inside_board(rr, cc):
+                while 0 <= rr < 10 and 0 <= cc < 9:
                     cand.append((rr, cc))
                     rr += dr
                     cc += dc
@@ -313,16 +321,153 @@ class Rules:
         return cand
 
     @staticmethod
+    def get_pseudo_legal_moves(board: Board, player: str) -> Iterator[Tuple[int, int, int, int]]:
+        """伪合法走法生成（仅几何与吃子颜色），供 AI 搜索批量过滤。
+
+        不调用 ``get_piece`` / ``_inside_board`` / ``is_valid_move``；不校验自将、白脸将。
+        产出 ``(r, c, nr, nc)``，与 ``get_all_moves`` 元组格式一致。
+        """
+        b = board.board
+
+        def dest_ok(cell) -> bool:
+            return cell is None or cell.color != player
+
+        for r, c in board.active_pieces[player]:
+            p = b[r][c]
+            if p is None or p.color != player:
+                continue
+            pt = p.piece_type
+
+            if pt == "che":
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nr, nc = r + dr, c + dc
+                    while 0 <= nr < 10 and 0 <= nc < 9:
+                        cell = b[nr][nc]
+                        if cell is None:
+                            yield (r, c, nr, nc)
+                        else:
+                            if cell.color != player:
+                                yield (r, c, nr, nc)
+                            break
+                        nr += dr
+                        nc += dc
+
+            elif pt == "pao":
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nr, nc = r + dr, c + dc
+                    seen_screen = False
+                    while 0 <= nr < 10 and 0 <= nc < 9:
+                        cell = b[nr][nc]
+                        if cell is None:
+                            if not seen_screen:
+                                yield (r, c, nr, nc)
+                        else:
+                            if not seen_screen:
+                                seen_screen = True
+                            else:
+                                if cell.color != player:
+                                    yield (r, c, nr, nc)
+                                break
+                        nr += dr
+                        nc += dc
+
+            elif pt == "ma":
+                for dr, dc in (
+                    (2, 1),
+                    (2, -1),
+                    (-2, 1),
+                    (-2, -1),
+                    (1, 2),
+                    (1, -2),
+                    (-1, 2),
+                    (-1, -2),
+                ):
+                    nr, nc = r + dr, c + dc
+                    if abs(dr) == 2:
+                        lr, lc = r + dr // 2, c
+                    else:
+                        lr, lc = r, c + dc // 2
+                    if not (0 <= lr < 10 and 0 <= lc < 9):
+                        continue
+                    if b[lr][lc] is not None:
+                        continue
+                    if not (0 <= nr < 10 and 0 <= nc < 9):
+                        continue
+                    dest = b[nr][nc]
+                    if dest_ok(dest):
+                        yield (r, c, nr, nc)
+
+            elif pt == "xiang":
+                for dr, dc in ((-2, -2), (-2, 2), (2, -2), (2, 2)):
+                    nr, nc = r + dr, c + dc
+                    if not (0 <= nr < 10 and 0 <= nc < 9):
+                        continue
+                    if player == "red":
+                        if nr < 5:
+                            continue
+                    else:
+                        if nr > 4:
+                            continue
+                    ir, ic = (r + nr) // 2, (c + nc) // 2
+                    if b[ir][ic]:
+                        continue
+                    dest = b[nr][nc]
+                    if dest_ok(dest):
+                        yield (r, c, nr, nc)
+
+            elif pt == "shi":
+                for dr, dc in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+                    nr, nc = r + dr, c + dc
+                    if not (0 <= nr < 10 and 0 <= nc < 9):
+                        continue
+                    if player == "red":
+                        if not (7 <= nr <= 9 and 3 <= nc <= 5):
+                            continue
+                    elif not (0 <= nr <= 2 and 3 <= nc <= 5):
+                        continue
+                    dest = b[nr][nc]
+                    if dest_ok(dest):
+                        yield (r, c, nr, nc)
+
+            elif pt == "jiang":
+                for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    nr, nc = r + dr, c + dc
+                    if not (0 <= nr < 10 and 0 <= nc < 9):
+                        continue
+                    if player == "red":
+                        if not (7 <= nr <= 9 and 3 <= nc <= 5):
+                            continue
+                    elif not (0 <= nr <= 2 and 3 <= nc <= 5):
+                        continue
+                    dest = b[nr][nc]
+                    if dest_ok(dest):
+                        yield (r, c, nr, nc)
+
+            elif pt == "bing":
+                if player == "red":
+                    cand = [(r - 1, c)]
+                    if r <= 4:
+                        cand.append((r, c - 1))
+                        cand.append((r, c + 1))
+                else:
+                    cand = [(r + 1, c)]
+                    if r >= 5:
+                        cand.append((r, c - 1))
+                        cand.append((r, c + 1))
+                for nr, nc in cand:
+                    if not (0 <= nr < 10 and 0 <= nc < 9):
+                        continue
+                    dest = b[nr][nc]
+                    if dest_ok(dest):
+                        yield (r, c, nr, nc)
+
+    @staticmethod
     def get_legal_moves(board: Board, player):
         return Rules.get_all_moves(board, player, validate_self_check=True)
 
     @staticmethod
     def is_king_in_check(board: Board, player: str) -> bool:
-        """轻量将军判定：仅检查对手是否有棋子能按几何规则吃到己方将/帅。
-
-        将位由 ``Board.red_king_pos`` / ``black_king_pos`` 提供；
-        敌方子力坐标由 ``active_pieces[opponent]`` 提供，免 90 格扫描。
-        """
+        """从将/帅位置反向射线与定点检测是否被将军（不调用 is_valid_move、不扫 active_pieces）。"""
         if player == "red":
             jiang_pos = board.red_king_pos
         else:
@@ -331,14 +476,68 @@ class Rules:
             return True
         kr, kc = jiang_pos
         opponent = "black" if player == "red" else "red"
-        for r, c in board.active_pieces[opponent]:
-            piece = board.board[r][c]
-            if not piece or piece.color != opponent:
+        b = board.board
+
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            obstacles = 0
+            r, c = kr + dr, kc + dc
+            while 0 <= r < 10 and 0 <= c < 9:
+                p = b[r][c]
+                if p is not None:
+                    if obstacles == 0:
+                        if p.color == opponent and p.piece_type == "che":
+                            return True
+                        obstacles = 1
+                    else:
+                        if p.color == opponent and p.piece_type == "pao":
+                            return True
+                        break
+                r += dr
+                c += dc
+
+        for dr, dc, leg_dr, leg_dc in (
+            (-2, -1, -1, 0),
+            (-2, 1, -1, 0),
+            (2, -1, 1, 0),
+            (2, 1, 1, 0),
+            (-1, -2, 0, -1),
+            (1, -2, 0, -1),
+            (-1, 2, 0, 1),
+            (1, 2, 0, 1),
+        ):
+            hr, hc = kr + dr, kc + dc
+            if not (0 <= hr < 10 and 0 <= hc < 9):
                 continue
-            if Rules.is_valid_move(
-                board, r, c, kr, kc, player=opponent, check_legality=False
-            ):
+            lr, lc = kr + leg_dr, kc + leg_dc
+            if not (0 <= lr < 10 and 0 <= lc < 9):
+                continue
+            if b[lr][lc] is not None:
+                continue
+            hp = b[hr][hc]
+            if hp is not None and hp.color == opponent and hp.piece_type == "ma":
                 return True
+
+        if player == "red":
+            for pr, pc in ((kr - 1, kc), (kr, kc - 1), (kr, kc + 1)):
+                if 0 <= pr < 10 and 0 <= pc < 9:
+                    pp = b[pr][pc]
+                    if (
+                        pp is not None
+                        and pp.color == opponent
+                        and pp.piece_type == "bing"
+                    ):
+                        return True
+        else:
+            for pr, pc in ((kr + 1, kc), (kr, kc - 1), (kr, kc + 1)):
+                if 0 <= pr < 10 and 0 <= pc < 9:
+                    pp = b[pr][pc]
+                    if (
+                        pp is not None
+                        and pp.color == opponent
+                        and pp.piece_type == "bing"
+                    ):
+                        return True
+
         return False
 
     @staticmethod

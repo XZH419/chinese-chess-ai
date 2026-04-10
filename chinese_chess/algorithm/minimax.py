@@ -147,8 +147,9 @@ class MinimaxAI:
         maximizing = (player == "red")  # 评估函数基础分为 red-black
         best_move = None
         best_value = float("-inf") if maximizing else float("inf")
+        any_legal_root = False
 
-        moves = Rules.get_all_moves(board, player, validate_self_check=False)
+        moves = list(Rules.get_pseudo_legal_moves(board, player))
         self.order_moves(board, moves, self.depth)
         for move in moves:
             if time_limit is not None and (time.time() - start) > time_limit:
@@ -159,6 +160,7 @@ class MinimaxAI:
             if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
                 board.undo_move(*move, captured)
                 continue
+            any_legal_root = True
             value = self._alphabeta(
                 board=board,
                 depth=self.depth - 1,
@@ -179,6 +181,16 @@ class MinimaxAI:
                 if value < best_value:
                     best_value = value
                     best_move = move
+
+        if not any_legal_root:
+            elapsed = time.time() - start
+            self.last_stats = {
+                "depth": int(self.depth),
+                "time_taken": float(elapsed),
+                "nodes_evaluated": int(self._nodes),
+                "tt_hits": int(self._tt_hits),
+            }
+            return None
 
         elapsed = time.time() - start
         self.last_stats = {
@@ -216,14 +228,14 @@ class MinimaxAI:
             self._tt_hits += 1
             return tt_hit
 
-        if depth == 0 or Rules.is_game_over(board):
+        if depth == 0:
             self._nodes += 1
             leaf = Evaluation.evaluate(board, maximizing_color=maximizing_color)
             self._tt_store_exact(pos_key, depth, leaf)
             return leaf
 
         player = board.current_player
-        moves = Rules.get_all_moves(board, player, validate_self_check=False)
+        moves = list(Rules.get_pseudo_legal_moves(board, player))
         self.order_moves(board, moves, depth)
 
         if maximizing:
@@ -256,7 +268,10 @@ class MinimaxAI:
                     break
             if not any_legal:
                 self._nodes += 1
-                value = Evaluation.evaluate(board, maximizing_color=maximizing_color)
+                sign = 1 if board.current_player == maximizing_color else -1
+                mate_score = float(sign * (-10000 + (self.depth - depth)))
+                self._tt_store_exact(pos_key, depth, mate_score)
+                return mate_score
             self._tt_store(pos_key, depth, value, alpha_orig, beta_orig)
             return value
         else:
@@ -289,7 +304,10 @@ class MinimaxAI:
                     break
             if not any_legal:
                 self._nodes += 1
-                value = Evaluation.evaluate(board, maximizing_color=maximizing_color)
+                sign = 1 if board.current_player == maximizing_color else -1
+                mate_score = float(sign * (-10000 + (self.depth - depth)))
+                self._tt_store_exact(pos_key, depth, mate_score)
+                return mate_score
             self._tt_store(pos_key, depth, value, alpha_orig, beta_orig)
             return value
 
