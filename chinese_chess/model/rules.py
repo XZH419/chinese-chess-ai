@@ -78,17 +78,17 @@ class Rules:
         if not check_legality:
             return True
 
-        # ===== 关键：自杀将军 + 白脸将拦截 =====
-        # 通过“临时落子”模拟走完这一步后的局面：
-        # - 若出现将帅对面（同列且无子遮挡） -> 非法
-        # - 若走完后己方将/帅被将军 -> 非法
-        captured = board.board[end_row][end_col]
-        board.board[end_row][end_col] = piece
-        board.board[start_row][start_col] = None
+        # ===== 关键：利用核心 Board 状态机进行无损模拟 =====
+        # 使用 apply_move 可以确保 grid, active_pieces, king_pos, zobrist_hash 全部精准同步
+        captured = board.apply_move(start_row, start_col, end_row, end_col)
+
+        # apply_move 会将 current_player 切换给对手
+        # 但我们需要验证的是原本走子的 player（即传参进来的 player）是否处于被将军状态
         kings_facing = Rules._jiang_face_to_face(board)
-        in_check = Rules.is_check(board, player)
-        board.board[start_row][start_col] = piece
-        board.board[end_row][end_col] = captured
+        in_check = Rules.is_king_in_check(board, player)
+
+        board.undo_move(start_row, start_col, end_row, end_col, captured)
+
         if kings_facing or in_check:
             return False
 
@@ -207,24 +207,17 @@ class Rules:
     def _jiang_face_to_face(board: Board):
         # **将帅对面（白脸将）**判定：
         # 若红/黑将帅在同一列，且中间无任何棋子遮挡，则该局面非法
-        jiang_pos = None
-        shuai_pos = None
-        for r in range(board.rows):
-            for c in range(board.cols):
-                piece = board.board[r][c]
-                if piece and piece.piece_type == "jiang":
-                    if piece.color == "red":
-                        jiang_pos = (r, c)
-                    else:
-                        shuai_pos = (r, c)
-        if not jiang_pos or not shuai_pos:
+        # 使用 Board 维护的将帅坐标，避免全盘扫描。
+        rk = board.red_king_pos
+        bk = board.black_king_pos
+        if rk is None or bk is None:
             return False
-        if jiang_pos[1] != shuai_pos[1]:
+        if rk[1] != bk[1]:
             return False
-        col = jiang_pos[1]
-        start = min(jiang_pos[0], shuai_pos[0]) + 1
-        end = max(jiang_pos[0], shuai_pos[0])
-        for r in range(start, end):
+        col = rk[1]
+        min_r = min(rk[0], bk[0])
+        max_r = max(rk[0], bk[0])
+        for r in range(min_r + 1, max_r):
             if board.board[r][col] is not None:
                 return False
         return True
@@ -234,24 +227,22 @@ class Rules:
         # 生成指定方的所有合法走法。
         # 如果 validate_self_check 为 True，则返回的走法不会使己方被将军。
         moves = []
-        for r in range(board.rows):
-            for c in range(board.cols):
-                piece = board.board[r][c]
-                if piece and piece.color == player:
-                    # 性能关键：不要暴力枚举 10*9 个目标格。
-                    # 先按棋子类型生成“候选目标格”，再用 is_valid_move 做最终过滤。
-                    candidates = Rules._candidate_targets(board, r, c, piece.piece_type, player)
-                    for er, ec in candidates:
-                        if Rules.is_valid_move(
-                            board,
-                            r,
-                            c,
-                            er,
-                            ec,
-                            player=player,
-                            check_legality=validate_self_check,
-                        ):
-                            moves.append((r, c, er, ec))
+        for r, c in board.active_pieces[player]:
+            piece = board.board[r][c]
+            if not piece or piece.color != player:
+                continue
+            candidates = Rules._candidate_targets(board, r, c, piece.piece_type, player)
+            for er, ec in candidates:
+                if Rules.is_valid_move(
+                    board,
+                    r,
+                    c,
+                    er,
+                    ec,
+                    player=player,
+                    check_legality=validate_self_check,
+                ):
+                    moves.append((r, c, er, ec))
         return moves
 
     @staticmethod
@@ -326,25 +317,34 @@ class Rules:
         return Rules.get_all_moves(board, player, validate_self_check=True)
 
     @staticmethod
-    def is_check(board: Board, player):
-        # 判断 player 方是否被将军：
-        # - 找到 player 的将/帅坐标
-        # - 枚举对手所有“伪合法”攻击走法（validate_self_check=False）
-        #   若有一步能落到将/帅位置，则为将军
-        opponent = "black" if player == "red" else "red"
-        jiang_pos = None
-        for r in range(board.rows):
-            for c in range(board.cols):
-                piece = board.board[r][c]
-                if piece and piece.color == player and piece.piece_type == "jiang":
-                    jiang_pos = (r, c)
-                    break
+    def is_king_in_check(board: Board, player: str) -> bool:
+        """轻量将军判定：仅检查对手是否有棋子能按几何规则吃到己方将/帅。
+
+        将位由 ``Board.red_king_pos`` / ``black_king_pos`` 提供；
+        敌方子力坐标由 ``active_pieces[opponent]`` 提供，免 90 格扫描。
+        """
+        if player == "red":
+            jiang_pos = board.red_king_pos
+        else:
+            jiang_pos = board.black_king_pos
         if not jiang_pos:
             return True
-        for move in Rules.get_all_moves(board, opponent, validate_self_check=False):
-            if move[2] == jiang_pos[0] and move[3] == jiang_pos[1]:
+        kr, kc = jiang_pos
+        opponent = "black" if player == "red" else "red"
+        for r, c in board.active_pieces[opponent]:
+            piece = board.board[r][c]
+            if not piece or piece.color != opponent:
+                continue
+            if Rules.is_valid_move(
+                board, r, c, kr, kc, player=opponent, check_legality=False
+            ):
                 return True
         return False
+
+    @staticmethod
+    def is_check(board: Board, player):
+        """判断 player 方是否被将军（与 is_king_in_check 语义相同，保留旧名）。"""
+        return Rules.is_king_in_check(board, player)
 
     @staticmethod
     def has_legal_moves(board: Board, player):

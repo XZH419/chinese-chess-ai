@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-from chinese_chess.model.rules import Rules
-
 
 class Evaluation:
     # 基础子力价值（单位分）
@@ -121,10 +119,8 @@ class Evaluation:
                     # 黑方位置表按行镜像（保持“红方视角表”可复用）
                     score -= base + float(pst[9 - r][c])
 
-        # 轻量机动性奖励（避免过强影响，保持可解释性）
-        red_moves = len(Rules.get_all_moves(board, "red"))
-        black_moves = len(Rules.get_all_moves(board, "black"))
-        score += (red_moves - black_moves) * 0.05
+        # 不再在评估里调用 get_all_moves（原“机动性”项会对每个叶子节点做两次全量走法生成，
+        # 往往占搜索总耗时的大部分；子力+PST 已足够支撑 Minimax 实验对比。）
 
         if maximizing_color is not None:
             return score if maximizing_color == "red" else -score

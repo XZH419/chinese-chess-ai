@@ -14,8 +14,9 @@ is moved to `chess/model/rules.py`.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Dict, Optional, Set, Tuple
 
+from . import zobrist
 from .piece import Piece
 
 
@@ -27,9 +28,18 @@ class Board:
         self.board = [[None for _ in range(self.cols)] for _ in range(self.rows)]
         # 本实现中红方先走。
         self.current_player = "red"
+        # 活跃棋子坐标（与 grid 同步；供走法生成 / 将军判定避免 90 格扫描）
+        self.active_pieces: Dict[str, Set[Tuple[int, int]]] = {"red": set(), "black": set()}
+        # 将帅坐标由走子同步维护，供 Rules 免全盘扫描；被吃后为 None
+        self.red_king_pos: Optional[Tuple[int, int]] = (9, 4)
+        self.black_king_pos: Optional[Tuple[int, int]] = (0, 4)
+        # Zobrist 局面键：由走子异或增量维护；置换表可直接用此值
+        self.zobrist_hash: int = 0
         self.init_board()
 
     def init_board(self):
+        self.active_pieces["red"].clear()
+        self.active_pieces["black"].clear()
         # 初始化黑方棋子在上方。
         self.board[0][0] = Piece("black", "che")
         self.board[0][1] = Piece("black", "ma")
@@ -70,6 +80,15 @@ class Board:
         self.board[6][6] = Piece("red", "bing")
         self.board[6][8] = Piece("red", "bing")
 
+        self.red_king_pos = (9, 4)
+        self.black_king_pos = (0, 4)
+        for r in range(self.rows):
+            for c in range(self.cols):
+                p = self.board[r][c]
+                if p is not None:
+                    self.active_pieces[p.color].add((r, c))
+        self.zobrist_hash = zobrist.full_hash(self)
+
     def get_piece(self, row, col):
         if 0 <= row < self.rows and 0 <= col < self.cols:
             return self.board[row][col]
@@ -80,6 +99,7 @@ class Board:
 
         This is a pure state operation; callers are responsible for ensuring
         consistency (primarily used by Rules during simulation and by tests).
+        Does not update ``active_pieces`` / ``zobrist_hash`` / king positions.
         """
 
         if 0 <= row < self.rows and 0 <= col < self.cols:
@@ -99,25 +119,80 @@ class Board:
         if piece is None:
             return None
         captured = self.board[end_row][end_col]
+        sq_s = start_row * 9 + start_col
+        sq_e = end_row * 9 + end_col
+        h = self.zobrist_hash
+        h ^= zobrist.piece_key(sq_s, piece)
+        if captured is not None:
+            h ^= zobrist.piece_key(sq_e, captured)
+        h ^= zobrist.piece_key(sq_e, piece)
+        h ^= zobrist.BLACK_TO_MOVE
+        self.zobrist_hash = h
+        mover = piece.color
+        opp = "black" if mover == "red" else "red"
+        self.active_pieces[mover].discard((start_row, start_col))
+        if captured is not None:
+            self.active_pieces[opp].discard((end_row, end_col))
+        self.active_pieces[mover].add((end_row, end_col))
+        if captured is not None and captured.piece_type == "jiang":
+            if captured.color == "red":
+                self.red_king_pos = None
+            else:
+                self.black_king_pos = None
         self.board[end_row][end_col] = piece
         self.board[start_row][start_col] = None
+        if piece.piece_type == "jiang":
+            if piece.color == "red":
+                self.red_king_pos = (end_row, end_col)
+            else:
+                self.black_king_pos = (end_row, end_col)
         self.current_player = "black" if self.current_player == "red" else "red"
         return captured
 
     def undo_move(self, start_row, start_col, end_row, end_col, captured):
         # 撤销刚才的走子，还原被吃棋子和当前执子方。
         piece = self.board[end_row][end_col]
+        sq_s = start_row * 9 + start_col
+        sq_e = end_row * 9 + end_col
+        h = self.zobrist_hash
+        h ^= zobrist.BLACK_TO_MOVE
+        h ^= zobrist.piece_key(sq_e, piece)
+        if captured is not None:
+            h ^= zobrist.piece_key(sq_e, captured)
+        h ^= zobrist.piece_key(sq_s, piece)
+        self.zobrist_hash = h
+        mover = piece.color
+        opp = "black" if mover == "red" else "red"
+        self.active_pieces[mover].discard((end_row, end_col))
+        if captured is not None:
+            self.active_pieces[opp].add((end_row, end_col))
+        self.active_pieces[mover].add((start_row, start_col))
         self.board[start_row][start_col] = piece
         self.board[end_row][end_col] = captured
+        if piece is not None and piece.piece_type == "jiang":
+            if piece.color == "red":
+                self.red_king_pos = (start_row, start_col)
+            else:
+                self.black_king_pos = (start_row, start_col)
+        if captured is not None and captured.piece_type == "jiang":
+            if captured.color == "red":
+                self.red_king_pos = (end_row, end_col)
+            else:
+                self.black_king_pos = (end_row, end_col)
         self.current_player = "black" if self.current_player == "red" else "red"
 
     def copy(self):
-        # 创建棋盘的深拷贝，用于搜索或模拟而不影响原棋盘状态。
-        import copy
-
+        # 浅拷贝网格引用（Piece 视为不可变）；避免 deepcopy 在辅助逻辑里拖慢性能。
         new_board = Board()
-        new_board.board = copy.deepcopy(self.board)
+        new_board.board = [row[:] for row in self.board]
         new_board.current_player = self.current_player
+        new_board.red_king_pos = self.red_king_pos
+        new_board.black_king_pos = self.black_king_pos
+        new_board.zobrist_hash = self.zobrist_hash
+        new_board.active_pieces = {
+            "red": set(self.active_pieces["red"]),
+            "black": set(self.active_pieces["black"]),
+        }
         return new_board
 
     def __str__(self):

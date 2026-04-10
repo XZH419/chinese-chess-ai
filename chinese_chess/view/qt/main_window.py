@@ -496,9 +496,12 @@ class MainWindow(QMainWindow):
             depth = stats.get("depth", "?")
             time_taken = stats.get("time_taken", "?")
             nodes = stats.get("nodes_evaluated", "?")
+            tt_hits = stats.get("tt_hits")
             self.append_log("本次搜索深度: " + str(depth))
             self.append_log("搜索耗时 (秒): " + (f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)))
             self.append_log("评估的节点总数: " + str(nodes))
+            if tt_hits is not None:
+                self.append_log("置换表命中次数: " + str(tt_hits))
         self.append_log("[UI] AI 信号接收完成，执行落子。")
         self.append_log("--------------------------")
         if move:
