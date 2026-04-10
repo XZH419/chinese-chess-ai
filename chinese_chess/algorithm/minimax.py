@@ -204,6 +204,61 @@ class MinimaxAI:
         print(f"评估的节点总数: {self._nodes} (置换表命中: {self._tt_hits})")
         return best_move
 
+    def _quiescence_search(
+        self,
+        board,
+        alpha: float,
+        beta: float,
+        maximizing_color: str,
+        depth_limit: int = 10,
+    ) -> float:
+        """静止搜索（Quiescence Search, QS）：仅扩展吃子走法，缓解水平线效应。
+
+        返回值与 `_alphabeta` 保持一致：始终是 `maximizing_color` 视角分数。
+        """
+        def q(alpha_n: float, beta_n: float, limit: int) -> float:
+            if limit <= 0:
+                self._nodes += 1
+                sign0 = 1 if board.current_player == maximizing_color else -1
+                return Evaluation.evaluate(board, maximizing_color=maximizing_color) * sign0
+
+            self._nodes += 1
+            sign0 = 1 if board.current_player == maximizing_color else -1
+            stand_pat = Evaluation.evaluate(board, maximizing_color=maximizing_color) * sign0
+            if stand_pat >= beta_n:
+                return beta_n
+            if stand_pat > alpha_n:
+                alpha_n = stand_pat
+
+            moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
+            captures = [m for m in moves if board.board[m[2]][m[3]] is not None]
+            if not captures:
+                return alpha_n
+
+            # MVV-LVA + killer（killer 在 QS 中影响小，但排序本身很关键）
+            self.order_moves(board, captures, limit)
+
+            for move in captures:
+                mover = board.current_player
+                captured = board.apply_move(*move)
+                if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
+                    board.undo_move(*move, captured)
+                    continue
+
+                score = -q(-beta_n, -alpha_n, limit - 1)
+                board.undo_move(*move, captured)
+
+                if score >= beta_n:
+                    return beta_n
+                if score > alpha_n:
+                    alpha_n = score
+
+            return alpha_n
+
+        sign = 1 if board.current_player == maximizing_color else -1
+        best_side = q(alpha * sign, beta * sign, depth_limit)
+        return float(best_side * sign)
+
     def _alphabeta(
         self,
         board,
@@ -229,10 +284,12 @@ class MinimaxAI:
             return tt_hit
 
         if depth == 0:
-            self._nodes += 1
-            leaf = Evaluation.evaluate(board, maximizing_color=maximizing_color)
-            self._tt_store_exact(pos_key, depth, leaf)
-            return leaf
+            return self._quiescence_search(
+                board=board,
+                alpha=alpha,
+                beta=beta,
+                maximizing_color=maximizing_color,
+            )
 
         player = board.current_player
         moves = list(Rules.get_pseudo_legal_moves(board, player))
