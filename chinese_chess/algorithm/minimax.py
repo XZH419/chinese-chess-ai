@@ -80,6 +80,8 @@ class MinimaxAI:
         self.history_hashes: List[int] = []
         # 历史启发：beta 剪枝着法加权，跨着法积累（与 TT 不同，不在每步根搜索清空）
         self.history_table: Dict[Tuple[int, int, int, int], int] = {}
+        # 静态评估置换表：zobrist_hash -> 分数（在 get_best_move 中按需清空防膨胀）
+        self.eval_table: Dict[int, float] = {}
 
     def reset_benchmark_stats(self) -> None:
         """清零基准统计（每局对弈开始前调用）。"""
@@ -238,6 +240,8 @@ class MinimaxAI:
         # 每步根搜索清空 TT：跨回合复用同键曾导致子树全命中、nodes=0 与着法异常
         self.transposition_table.clear()
         self._reset_killers()
+        if len(self.eval_table) > 100_000:
+            self.eval_table.clear()
 
         # 外部可传入从开局到当前局面的完整哈希链；若末尾已是当前局面则不再重复追加
         self.history_hashes = list(game_history) if game_history else []
@@ -369,6 +373,14 @@ class MinimaxAI:
             print(f"评估的节点总数: {self._nodes} (置换表命中: {self._tt_hits})")
         return global_best_move
 
+    def _get_cached_eval(self, board) -> float:
+        key = board.zobrist_hash
+        if key in self.eval_table:
+            return self.eval_table[key]
+        score = Evaluation.evaluate(board)
+        self.eval_table[key] = score
+        return score
+
     def _quiescence_search(
         self,
         board,
@@ -386,11 +398,11 @@ class MinimaxAI:
 
         if depth_limit <= 0:
             self._nodes += 1
-            return Evaluation.evaluate(board)
+            return self._get_cached_eval(board)
 
         self._nodes += 1
         alpha_bound = alpha
-        stand_pat = Evaluation.evaluate(board)
+        stand_pat = self._get_cached_eval(board)
         if stand_pat >= beta:
             return beta
         if stand_pat > alpha:

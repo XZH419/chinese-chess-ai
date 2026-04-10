@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-
 from chinese_chess.model.board import Board
 from chinese_chess.model.rules import Rules
 
@@ -177,9 +175,13 @@ class Evaluation:
     def _palace_pressure(board: Board, player: str) -> float:
         """大子伪合法落点与敌方九宫的交集规模 × 分；每方一次全量 ``get_pseudo_legal_moves``。"""
         enemy_palace = BLACK_PALACE_SQUARES if player == "red" else RED_PALACE_SQUARES
-        dest_by_start: defaultdict[tuple[int, int], set[tuple[int, int]]] = defaultdict(set)
+        # 单次遍历：每起点落在九宫内的走法条数（无 per-start set；与「去重后的落点数」一致当且仅当
+        # 同一 (起点, 终点) 在伪合法列表中至多出现一次）
+        palace_hits_by_start: dict[tuple[int, int], int] = {}
         for sr, sc, er, ec in Rules.get_pseudo_legal_moves(board, player):
-            dest_by_start[(sr, sc)].add((er, ec))
+            if (er, ec) in enemy_palace:
+                k = (sr, sc)
+                palace_hits_by_start[k] = palace_hits_by_start.get(k, 0) + 1
 
         pressure = 0.0
         b = board.board
@@ -195,8 +197,8 @@ class Evaluation:
                     continue
                 if player == "black" and r <= 4:
                     continue
-            hits = dest_by_start.get((r, c), set()) & enemy_palace
-            pressure += len(hits) * 20.0
+            hits = palace_hits_by_start.get((r, c), 0)
+            pressure += hits * 20.0
         return pressure
 
     @staticmethod
