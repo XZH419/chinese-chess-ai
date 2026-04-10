@@ -28,6 +28,10 @@ _KILLER_SECONDARY_BONUS = 4000
 MAX_KILLER_DEPTH = 10
 
 
+class SearchTimeoutException(Exception):
+    """Abort the current iterative-deepening iteration on timeout."""
+
+
 class MinimaxAI:
     def __init__(self, depth=3):
         # Minimax搜索的深度限制。
@@ -40,14 +44,19 @@ class MinimaxAI:
         self.killer_moves: List[List[Optional[Tuple[int, int, int, int]]]] = [
             [None, None] for _ in range(MAX_KILLER_DEPTH)
         ]
-        # 普通 dict 置换表；值为 (stored_depth, score, flag)
-        self.transposition_table: Dict[int, Tuple[int, float, int]] = {}
+        # 普通 dict 置换表；值为 (stored_depth, score, flag, best_move)
+        self.transposition_table: Dict[
+            int, Tuple[int, float, int, Optional[Tuple[int, int, int, int]]]
+        ] = {}
+        # 仅供搜索期间使用的上下文（避免每层层层传递）
+        self.start_time: float = 0.0
+        self.maximizing_color: str = "red"
 
     def _tt_probe(self, key: int, depth: int, alpha: float, beta: float) -> Optional[float]:
         entry = self.transposition_table.get(key)
         if entry is None:
             return None
-        stored_depth, score, flag = entry
+        stored_depth, score, flag, _best_move = entry
         if stored_depth < depth:
             return None
         if flag == _TT_EXACT:
@@ -58,7 +67,15 @@ class MinimaxAI:
             return score
         return None
 
-    def _tt_store(self, key: int, depth: int, score: float, alpha_orig: float, beta_orig: float) -> None:
+    def _tt_store(
+        self,
+        key: int,
+        depth: int,
+        score: float,
+        alpha_orig: float,
+        beta_orig: float,
+        best_move: Optional[Tuple[int, int, int, int]],
+    ) -> None:
         # 避免 alpha=-inf / beta=+inf 时误分类（虽多数情况下有限分数不会踩坑）
         if score <= alpha_orig and alpha_orig != float("-inf"):
             flag = _TT_UPPER
@@ -66,14 +83,27 @@ class MinimaxAI:
             flag = _TT_LOWER
         else:
             flag = _TT_EXACT
-        self._tt_write_entry(key, depth, score, flag)
+        self._tt_write_entry(key, depth, score, flag, best_move)
 
-    def _tt_store_exact(self, key: int, depth: int, score: float) -> None:
+    def _tt_store_exact(
+        self,
+        key: int,
+        depth: int,
+        score: float,
+        best_move: Optional[Tuple[int, int, int, int]] = None,
+    ) -> None:
         """叶节点/评估值与搜索窗口无关，固定为 EXACT。"""
-        self._tt_write_entry(key, depth, score, _TT_EXACT)
+        self._tt_write_entry(key, depth, score, _TT_EXACT, best_move)
 
-    def _tt_write_entry(self, key: int, depth: int, score: float, flag: int) -> None:
-        self.transposition_table[key] = (depth, score, flag)
+    def _tt_write_entry(
+        self,
+        key: int,
+        depth: int,
+        score: float,
+        flag: int,
+        best_move: Optional[Tuple[int, int, int, int]],
+    ) -> None:
+        self.transposition_table[key] = (depth, score, flag, best_move)
 
     @staticmethod
     def _killer_index(depth: int) -> int:
@@ -111,8 +141,12 @@ class MinimaxAI:
         ki = self._killer_index(depth)
         killers = self.killer_moves[ki]
         k0, k1 = killers[0], killers[1]
+        entry = self.transposition_table.get(board.zobrist_hash)
+        tt_move = entry[3] if entry is not None else None
 
         def move_score(m: Tuple[int, int, int, int]) -> int:
+            if tt_move is not None and m == tt_move:
+                return 1_000_000_000
             sr, sc, er, ec = m
             victim = board.get_piece(er, ec)
             if victim is None:
@@ -135,64 +169,74 @@ class MinimaxAI:
         return self.get_best_move(board, time_limit=time_limit)
 
     def get_best_move(self, board, time_limit: Optional[float] = 10.0):
-        """在允许时间内选择最优走法（Alpha-Beta Minimax）。"""
-        start = time.time()
+        """在允许时间内选择最优走法（Alpha-Beta Minimax + Iterative Deepening）。"""
+        self.start_time = time.time()
         self._nodes = 0
         self._tt_hits = 0
         # 每步根搜索清空 TT：跨回合复用同键曾导致子树全命中、nodes=0 与着法异常
         self.transposition_table.clear()
         self._reset_killers()
 
-        player = board.current_player
-        maximizing = (player == "red")  # 评估函数基础分为 red-black
-        best_move = None
-        best_value = float("-inf") if maximizing else float("inf")
-        any_legal_root = False
+        self.maximizing_color = board.current_player
+        maximizing = self.maximizing_color == "red"  # 评估函数基础分为 red-black
+        global_best_move: Optional[Tuple[int, int, int, int]] = None
 
-        moves = list(Rules.get_pseudo_legal_moves(board, player))
-        self.order_moves(board, moves, self.depth)
-        for move in moves:
-            if time_limit is not None and (time.time() - start) > time_limit:
-                break
+        try:
+            for current_depth in range(1, self.depth + 1):
+                moves = list(Rules.get_pseudo_legal_moves(board, self.maximizing_color))
+                self.order_moves(board, moves, current_depth)
 
-            mover = board.current_player
-            captured = board.apply_move(*move)
-            if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
-                board.undo_move(*move, captured)
-                continue
-            any_legal_root = True
-            value = self._alphabeta(
-                board=board,
-                depth=self.depth - 1,
-                alpha=float("-inf"),
-                beta=float("inf"),
-                maximizing=not maximizing,
-                start_time=start,
-                time_limit=time_limit,
-                maximizing_color=player,
-            )
-            board.undo_move(*move, captured)
+                best_score = float("-inf") if maximizing else float("inf")
+                current_best_move: Optional[Tuple[int, int, int, int]] = None
+                any_legal = False
 
-            if maximizing:
-                if value > best_value:
-                    best_value = value
-                    best_move = move
-            else:
-                if value < best_value:
-                    best_value = value
-                    best_move = move
+                for move in moves:
+                    if time_limit is not None and (time.time() - self.start_time) > time_limit:
+                        raise SearchTimeoutException()
 
-        if not any_legal_root:
-            elapsed = time.time() - start
-            self.last_stats = {
-                "depth": int(self.depth),
-                "time_taken": float(elapsed),
-                "nodes_evaluated": int(self._nodes),
-                "tt_hits": int(self._tt_hits),
-            }
-            return None
+                    mover = board.current_player
+                    captured = board.apply_move(*move)
 
-        elapsed = time.time() - start
+                    # 延迟合法性校验（防送将/白脸将）
+                    if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
+                        board.undo_move(*move, captured)
+                        continue
+
+                    any_legal = True
+                    score = self._alphabeta(
+                        board=board,
+                        depth=current_depth - 1,
+                        alpha=float("-inf"),
+                        beta=float("inf"),
+                        maximizing=not maximizing,
+                        start_time=self.start_time,
+                        time_limit=time_limit,
+                        maximizing_color=self.maximizing_color,
+                    )
+                    board.undo_move(*move, captured)
+
+                    if maximizing:
+                        if score > best_score:
+                            best_score = score
+                            current_best_move = move
+                    else:
+                        if score < best_score:
+                            best_score = score
+                            current_best_move = move
+
+                if not any_legal:
+                    break  # 根节点无路可走：被将死/困毙
+
+                if current_best_move is not None:
+                    global_best_move = current_best_move
+                    # 根节点显式写入 TT：避免 depth=1 直接进入 QS 时超时回退丢失
+                    self._tt_store_exact(
+                        board.zobrist_hash, current_depth, float(best_score), current_best_move
+                    )
+        except SearchTimeoutException:
+            pass
+
+        elapsed = time.time() - self.start_time
         self.last_stats = {
             "depth": int(self.depth),
             "time_taken": float(elapsed),
@@ -202,7 +246,7 @@ class MinimaxAI:
         print(f"本次搜索深度: {self.depth}")
         print(f"搜索耗时 (秒): {elapsed:.3f}")
         print(f"评估的节点总数: {self._nodes} (置换表命中: {self._tt_hits})")
-        return best_move
+        return global_best_move
 
     def _quiescence_search(
         self,
@@ -210,7 +254,7 @@ class MinimaxAI:
         alpha: float,
         beta: float,
         maximizing_color: str,
-        depth_limit: int = 10,
+        depth_limit: int = 4,
     ) -> float:
         """静止搜索（Quiescence Search, QS）：仅扩展吃子走法，缓解水平线效应。
 
@@ -272,9 +316,7 @@ class MinimaxAI:
     ) -> float:
         """标准 Alpha-Beta 剪枝递归。"""
         if time_limit is not None and (time.time() - start_time) > time_limit:
-            # 超时：返回当前评估（不再扩展）
-            self._nodes += 1
-            return Evaluation.evaluate(board, maximizing_color=maximizing_color)
+            raise SearchTimeoutException()
 
         alpha_orig, beta_orig = alpha, beta
         pos_key = board.zobrist_hash
@@ -298,7 +340,10 @@ class MinimaxAI:
         if maximizing:
             value = float("-inf")
             any_legal = False
+            best_move = None
             for move in moves:
+                if time_limit is not None and (time.time() - start_time) > time_limit:
+                    raise SearchTimeoutException()
                 is_cap = self._is_capture(board, move)
                 mover = board.current_player
                 captured = board.apply_move(*move)
@@ -317,7 +362,9 @@ class MinimaxAI:
                     maximizing_color=maximizing_color,
                 )
                 board.undo_move(*move, captured)
-                value = max(value, child)
+                if child > value:
+                    value = child
+                    best_move = move
                 alpha = max(alpha, value)
                 if beta <= alpha:
                     if not is_cap:
@@ -327,14 +374,17 @@ class MinimaxAI:
                 self._nodes += 1
                 sign = 1 if board.current_player == maximizing_color else -1
                 mate_score = float(sign * (-10000 + (self.depth - depth)))
-                self._tt_store_exact(pos_key, depth, mate_score)
+                self._tt_store_exact(pos_key, depth, mate_score, None)
                 return mate_score
-            self._tt_store(pos_key, depth, value, alpha_orig, beta_orig)
+            self._tt_store(pos_key, depth, value, alpha_orig, beta_orig, best_move)
             return value
         else:
             value = float("inf")
             any_legal = False
+            best_move = None
             for move in moves:
+                if time_limit is not None and (time.time() - start_time) > time_limit:
+                    raise SearchTimeoutException()
                 is_cap = self._is_capture(board, move)
                 mover = board.current_player
                 captured = board.apply_move(*move)
@@ -353,7 +403,9 @@ class MinimaxAI:
                     maximizing_color=maximizing_color,
                 )
                 board.undo_move(*move, captured)
-                value = min(value, child)
+                if child < value:
+                    value = child
+                    best_move = move
                 beta = min(beta, value)
                 if beta <= alpha:
                     if not is_cap:
@@ -363,8 +415,8 @@ class MinimaxAI:
                 self._nodes += 1
                 sign = 1 if board.current_player == maximizing_color else -1
                 mate_score = float(sign * (-10000 + (self.depth - depth)))
-                self._tt_store_exact(pos_key, depth, mate_score)
+                self._tt_store_exact(pos_key, depth, mate_score, None)
                 return mate_score
-            self._tt_store(pos_key, depth, value, alpha_orig, beta_orig)
+            self._tt_store(pos_key, depth, value, alpha_orig, beta_orig, best_move)
             return value
 
