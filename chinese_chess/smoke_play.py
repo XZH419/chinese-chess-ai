@@ -1,41 +1,38 @@
-"""Headless smoke test for controller + RandomAI.
+"""Headless smoke test for controller + agents.
 
-Run (inside conda env):
-    conda run -n chessai python chess/smoke_play.py
+Run (repo root):
+    python -m chinese_chess.main cli --red random --black random
 
-This script is non-interactive and is meant to catch obvious import/runtime
-errors after refactors.
+This file is also invoked from `main.py` cli mode with the user-built controller.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from chinese_chess.control.controller import GameController
 
 # When running this file directly, Python puts this directory (`.../chinese_chess/`)
 # on sys.path, which prevents `import chinese_chess...` from resolving (it needs the
 # repo root on sys.path). Insert the repo root explicitly.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from chinese_chess.control.controller import GameController
 
+def main(controller: Optional["GameController"] = None) -> None:
+    from chinese_chess.algorithm.random_ai import RandomAI
+    from chinese_chess.control.controller import GameController
 
-def main() -> None:
-    controller = GameController()
+    if controller is None:
+        controller = GameController(red_agent=RandomAI(), black_agent=RandomAI())
 
-    # Let the controller's default RandomAI play as black.
-    # For smoke testing, we'll also let red play random by temporarily swapping
-    # the ai_color when it's red's turn.
     max_plies = 40
     plies = 0
 
     while not controller.is_game_over() and plies < max_plies:
-        if controller.board.current_player == "red":
-            controller.ai_color = "red"
-            controller.maybe_play_ai_turn(time_limit=0.1)
-            controller.ai_color = "black"
-        else:
-            controller.maybe_play_ai_turn(time_limit=0.1)
+        controller.maybe_play_ai_turn(time_limit=0.1)
         plies += 1
 
     print("smoke ok")

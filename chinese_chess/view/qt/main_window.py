@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from chinese_chess.algorithm.minimax import MinimaxAI
 from chinese_chess.control.controller import GameController, MoveOutcome
 
 
@@ -289,8 +290,13 @@ class MainWindow(QMainWindow):
     def __init__(self, controller: Optional[GameController] = None):
         super().__init__()
 
-        self.controller = controller or GameController()
+        # 无注入时显式默认：人红 vs Minimax 黑（Controller 内不再隐式挂载 AI）
+        self.controller = controller or GameController(
+            red_agent=None,
+            black_agent=MinimaxAI(depth=3),
+        )
         self.human_color = "red"
+        self._sync_human_color_from_controller()
 
         self._selected: Optional[Pos] = None
         self._selected_item: Optional[PixmapPieceItem] = None
@@ -300,12 +306,13 @@ class MainWindow(QMainWindow):
 
         self._init_window()
         self._init_ui()
+        self.append_log("[对局] " + self.controller.matchup_line())
         self._refresh_status()
         # 启动时立即检查：如果红方是 AI，则自动走子
         self.check_and_run_ai()
 
     def _init_window(self) -> None:
-        self.setWindowTitle("中国象棋 AI (Controller 驱动)")
+        self.setWindowTitle(f"中国象棋 — {self.controller.matchup_line()}")
         icon_path = _img("icon.png")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -349,6 +356,17 @@ class MainWindow(QMainWindow):
         right.addWidget(self.reset_btn)
 
         right.addStretch(1)
+
+    def _sync_human_color_from_controller(self) -> None:
+        """与 GameController 一致：仅一方为人类时，把点击走子绑定到该方（避免红黑弄反）。"""
+        r, b = self.controller.red_agent, self.controller.black_agent
+        if r is None and b is not None:
+            self.human_color = "red"
+        elif b is None and r is not None:
+            self.human_color = "black"
+        else:
+            # 双 AI 或双方人类：点击逻辑仍按「红方侧」占位；双人同机可后续扩展选边
+            self.human_color = "red"
 
     def _finalize_after_legal_move(self, outcome: MoveOutcome) -> None:
         """落子已成功写入棋盘后：刷新 UI、处理和棋弹窗、抬高 run_id 以丢弃迟到的 AI 信号。"""
@@ -421,6 +439,8 @@ class MainWindow(QMainWindow):
         self._selected_item = None
         self._refresh_status()
         self.append_log("[UI] 重置对局（保持当前 AI 配置）")
+        self.append_log("[对局] " + self.controller.matchup_line())
+        self.setWindowTitle(f"中国象棋 — {self.controller.matchup_line()}")
         # 3) 重置后立刻接力：AI vs AI 会自动开新局第一步
         self.check_and_run_ai()
 
@@ -481,7 +501,11 @@ class MainWindow(QMainWindow):
             self._refresh_status()
             return
 
-        current_agent = self.controller.agent_for(self.controller.board.current_player)
+        cp = self.controller.board.current_player
+        if cp == "red":
+            current_agent = self.controller.red_agent
+        else:
+            current_agent = self.controller.black_agent
         if current_agent is None:
             # 人类回合：等待点击
             self._refresh_status()
@@ -491,7 +515,7 @@ class MainWindow(QMainWindow):
         if self._ai_thread and self._ai_thread.isRunning():
             return
 
-        side = self._side_name(self.controller.board.current_player)
+        side = self._side_name(cp)
         depth = self._agent_depth_hint(current_agent)
         if depth is not None:
             print(f"[UI] 检测到 AI 回合（{side}，深度={depth}），启动计算...")
@@ -503,7 +527,7 @@ class MainWindow(QMainWindow):
             self.append_log(f"[UI] 检测到 AI 回合 ({side})，开始计算...")
 
         board_snapshot = self.controller.board.copy()
-        ai_color = self.controller.board.current_player
+        ai_color = cp
         run_id = self._run_id
         game_hist = list(self.controller.game_history_hashes)
         self._ai_thread = AIMoveThread(

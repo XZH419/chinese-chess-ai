@@ -2,6 +2,9 @@
 
 目标：把“谁走、是否合法、是否终局、AI 走子”这些流程统一收拢到 Controller，
 让 CLI/GUI 变成薄 View（只负责输入/渲染），从而对齐参考项目的 MVC 结构。
+
+重要：不在此模块内为任何一方隐式挂载 AI；``red_agent`` / ``black_agent`` 为 ``None`` 即人类，
+须在入口（CLI/GUI）显式构造后传入。
 """
 
 from __future__ import annotations
@@ -11,7 +14,27 @@ from typing import Any, List, Optional, Tuple
 
 from chinese_chess.model.board import Board
 from chinese_chess.model.rules import Rules
-from chinese_chess.algorithm.minimax import MinimaxAI
+
+
+def describe_player_agent(agent: Optional[Any]) -> str:
+    """人类 / Minimax / Random 等单侧展示名（不含「红方」前缀）。"""
+    if agent is None:
+        return "Human"
+    cls = type(agent).__name__
+    if cls == "MinimaxAI":
+        d = getattr(agent, "depth", None)
+        return f"Minimax, Depth={d}" if isinstance(d, int) else "Minimax"
+    if cls == "RandomAI":
+        return "Random"
+    return cls
+
+
+def format_matchup_line(red_agent: Optional[Any], black_agent: Optional[Any]) -> str:
+    """例如：红方 (Human) vs 黑方 (Minimax, Depth=3)"""
+    return (
+        f"红方 ({describe_player_agent(red_agent)}) "
+        f"vs 黑方 ({describe_player_agent(black_agent)})"
+    )
 
 
 class AgentProtocol:
@@ -59,13 +82,13 @@ class GameController:
         # 全局对局 Zobrist 局面链（含当前盘面），供 Minimax 重复局面检测与规则判和
         self.game_history_hashes: List[int] = [self.board.zobrist_hash]
 
-        # 默认行为：若未指定 black_agent，则用 Minimax(depth=3) 作为黑方 AI
-        if self.black_agent is None:
-            self.black_agent = MinimaxAI(depth=3)
-
     def agent_for(self, color: str):
-        """返回指定方的 agent；None 表示人类。"""
-        return self.red_agent if color == "red" else self.black_agent
+        """返回指定方的 agent；None 表示人类。必须与 board.current_player 的 'red'/'black' 一致使用。"""
+        if color == "red":
+            return self.red_agent
+        if color == "black":
+            return self.black_agent
+        raise ValueError(f"unknown side: {color!r}")
 
     def can_move(self, move: Tuple[int, int, int, int], player: Optional[str] = None) -> bool:
         """Check if a move is legal for player on current board."""
@@ -124,6 +147,10 @@ class GameController:
         self.board = Board()
         self.game_history_hashes = [self.board.zobrist_hash]
 
+    def matchup_line(self) -> str:
+        """当前控制器绑定的红黑对阵说明（供 CLI/GUI 打印）。"""
+        return format_matchup_line(self.red_agent, self.black_agent)
+
     def maybe_play_ai_turn(self, time_limit: float = 5.0) -> MoveOutcome:
         """若轮到 AI，则让对应 agent 走一步；否则返回 ok=False。
 
@@ -134,7 +161,8 @@ class GameController:
         """
         if self.is_game_over():
             return MoveOutcome(ok=False, message="game over")
-        agent = self.agent_for(self.board.current_player)
+        cp = self.board.current_player
+        agent = self.red_agent if cp == "red" else self.black_agent
         if agent is None:
             return MoveOutcome(ok=False, message="human turn")
 

@@ -6,6 +6,7 @@ and API updates (Board.make_move -> Board.apply_move, Board.*rules -> Rules.*).
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,13 +35,29 @@ class SearchTimeoutException(Exception):
 
 
 class MinimaxAI:
-    def __init__(self, depth=3):
+    def __init__(
+        self,
+        depth=3,
+        stochastic: bool = False,
+        top_k: int = 3,
+        tolerance: int = 20,
+        verbose: bool = True,
+    ):
         # Minimax搜索的深度限制。
         self.depth = depth
+        # 根节点：在「近最优」走法中随机化，打破纯确定性开局
+        self.stochastic = stochastic
+        self.top_k = top_k
+        self.tolerance = tolerance
+        self.verbose = verbose
         self._nodes = 0
         self._tt_hits = 0
         # 供 GUI Dashboard/日志读取的最近一次搜索统计
         self.last_stats: Dict[str, Any] = {}
+        # 无头基准：跨多局累加本实例每次 get_best_move 的耗时与节点（由 reset_benchmark_stats 清零）
+        self._bench_total_time: float = 0.0
+        self._bench_total_nodes: int = 0
+        self._bench_search_count: int = 0
         # 每层深度最多保存 2 个杀手走法（位移覆盖：新杀手占 slot0，原 slot0 下沉到 slot1）
         self.killer_moves: List[List[Optional[Tuple[int, int, int, int]]]] = [
             [None, None] for _ in range(MAX_KILLER_DEPTH)
@@ -53,6 +70,12 @@ class MinimaxAI:
         self.start_time: float = 0.0
         # 重复局面检测：保存“从根到当前节点”的 zobrist_hash 路径（可叠加外部 game_history）
         self.history_hashes: List[int] = []
+
+    def reset_benchmark_stats(self) -> None:
+        """清零基准统计（每局对弈开始前调用）。"""
+        self._bench_total_time = 0.0
+        self._bench_total_nodes = 0
+        self._bench_search_count = 0
 
     def _tt_probe(self, key: int, depth: int, alpha: float, beta: float) -> Optional[float]:
         entry = self.transposition_table.get(key)
@@ -201,8 +224,7 @@ class MinimaxAI:
                 moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
                 self.order_moves(board, moves, current_depth)
 
-                best_score = float("-inf")
-                current_best_move: Optional[Tuple[int, int, int, int]] = None
+                scored_moves: List[Tuple[float, Tuple[int, int, int, int]]] = []
                 any_legal = False
 
                 for move in moves:
@@ -233,19 +255,30 @@ class MinimaxAI:
                         self.history_hashes.pop()
                         board.undo_move(*move, captured)
 
-                    if score > best_score:
-                        best_score = score
-                        current_best_move = move
+                    scored_moves.append((score, move))
 
                 if not any_legal:
                     break  # 根节点无路可走：被将死/困毙
 
-                if current_best_move is not None:
-                    global_best_move = current_best_move
-                    # 根节点显式写入 TT：避免 depth=1 直接进入 QS 时超时回退丢失
-                    self._tt_store_exact(
-                        board.zobrist_hash, current_depth, float(best_score), current_best_move
-                    )
+                scored_moves.sort(key=lambda x: x[0], reverse=True)
+                max_score = scored_moves[0][0]
+                if not self.stochastic:
+                    current_best_move = scored_moves[0][1]
+                    root_tt_score = max_score
+                else:
+                    near_best = [
+                        (s, m) for s, m in scored_moves if s >= max_score - self.tolerance
+                    ]
+                    pool = near_best[: self.top_k]
+                    picked = random.choice(pool)
+                    current_best_move = picked[1]
+                    root_tt_score = picked[0]
+
+                global_best_move = current_best_move
+                # 根节点显式写入 TT：避免 depth=1 直接进入 QS 时超时回退丢失
+                self._tt_store_exact(
+                    board.zobrist_hash, current_depth, float(root_tt_score), current_best_move
+                )
         except SearchTimeoutException:
             pass
 
@@ -256,9 +289,13 @@ class MinimaxAI:
             "nodes_evaluated": int(self._nodes),
             "tt_hits": int(self._tt_hits),
         }
-        print(f"本次搜索深度: {self.depth}")
-        print(f"搜索耗时 (秒): {elapsed:.3f}")
-        print(f"评估的节点总数: {self._nodes} (置换表命中: {self._tt_hits})")
+        self._bench_total_time += float(elapsed)
+        self._bench_total_nodes += int(self._nodes)
+        self._bench_search_count += 1
+        if self.verbose:
+            print(f"本次搜索深度: {self.depth}")
+            print(f"搜索耗时 (秒): {elapsed:.3f}")
+            print(f"评估的节点总数: {self._nodes} (置换表命中: {self._tt_hits})")
         return global_best_move
 
     def _quiescence_search(
