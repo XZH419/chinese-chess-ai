@@ -594,7 +594,12 @@ class Rules:
 
     @staticmethod
     def is_threefold_repetition_draw(board: Board, position_history: list) -> bool:
-        """同一局面（Zobrist）在局面链中出现至少 3 次时判和（简易防循环）。"""
+        """同一局面（Zobrist）在局面链中出现至少 3 次时判和（简易防循环）。
+
+        注意：Minimax 在搜索路径上遇到重复局面时，用
+        ``Evaluation.repetition_leaf_score`` 给分（大优厌战、大劣接受和棋），
+        与终局层面的本布尔判定相互独立。
+        """
         if not position_history:
             return False
         h = board.zobrist_hash

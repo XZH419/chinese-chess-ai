@@ -382,7 +382,7 @@ class MinimaxAI:
         返回值与 `_alphabeta` 一致：当前行棋方视角，分越高越好。
         """
         if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
-            return 0.0
+            return Evaluation.repetition_leaf_score(board)
 
         if depth_limit <= 0:
             self._nodes += 1
@@ -448,7 +448,7 @@ class MinimaxAI:
         ``_MAX_CHECK_EXTENSIONS`` 次/路径），减轻将线剪枝过浅。
         """
         if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
-            return 0.0
+            return Evaluation.repetition_leaf_score(board)
         if time_limit is not None and (time.time() - start_time) > time_limit:
             raise SearchTimeoutException()
 

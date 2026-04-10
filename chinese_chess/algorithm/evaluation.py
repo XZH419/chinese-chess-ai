@@ -3,18 +3,20 @@
 目标：
 - 子力价值：车900，炮450，马400，兵100，士/相200
 - 位置分：Piece-Square Tables（PST）
-- 统一评分：score = 红(子力+位置) - 黑(子力+位置)
+- 兑子惩罚、炮架/马腿机动、九宫压力、残局兵价值、将军奖励
 - 返回：当前行棋方视角；双方均无车/马/炮/兵时视为物质和棋，直接 0 分
 """
 
 from __future__ import annotations
 
+from chinese_chess.model.board import Board
 from chinese_chess.model.rules import Rules
 
 
 class Evaluation:
     # 可参与将杀/实质性进攻的子力（仅剩将、士、象视为无法将死 → 评估为和）
     ATTACKING_PIECE_TYPES = frozenset({"che", "ma", "pao", "bing"})
+    MAJOR_TYPES = frozenset({"che", "ma", "pao"})
 
     # 基础子力价值（单位分）
     PIECE_VALUES = {
@@ -24,15 +26,18 @@ class Evaluation:
         "xiang": 200,
         "shi": 200,
         "bing": 100,
-        # 将/帅在正常局面中恒存在，终局由搜索层 mate_score 处理；此处置 0 避免干扰 PST。
         "jiang": 0,
     }
 
-    # 位置矩阵：以红方视角（row 从上到下 0..9，红方在下方）
-    # 黑方使用“翻转行坐标”进行镜像使用。
+    # 开局子力总和约量级，用于兑子惩罚归一
+    _REF_TOTAL_MATERIAL = 4400
+    # 领先方（|diff|>50）在子力减少时受到的兑子惩罚系数
+    _ANTI_TRADE_COEFF = 0.018
+    # 残局：子力总和低于此或棋子数少时强化过河兵
+    _ENDGAME_MATERIAL = 2800
+    _ENDGAME_PIECE_COUNT = 15
+
     PST_BING = [
-        # 红兵向“上”（r 递减）推进：过河前(>=5)很低；过河后越接近对方九宫越高；
-        # 贴近底线(row==0)略回落，避免“老兵搜身”过度加分。
         [14, 14, 16, 18, 20, 18, 16, 14, 14],
         [16, 16, 18, 22, 24, 22, 18, 16, 16],
         [12, 12, 16, 20, 22, 20, 16, 12, 12],
@@ -46,7 +51,6 @@ class Evaluation:
     ]
 
     PST_MA = [
-        # 中心位、卧槽位、挂角位更活跃；边线/死角弱
         [0, 1, 2, 4, 4, 4, 2, 1, 0],
         [1, 4, 7, 9, 10, 9, 7, 4, 1],
         [2, 7, 10, 12, 13, 12, 10, 7, 2],
@@ -60,7 +64,6 @@ class Evaluation:
     ]
 
     PST_CHE = [
-        # 车偏好开放线与过河后的进攻位；死角略低
         [4, 5, 6, 7, 8, 7, 6, 5, 4],
         [5, 6, 7, 8, 9, 8, 7, 6, 5],
         [6, 7, 8, 9, 10, 9, 8, 7, 6],
@@ -85,13 +88,129 @@ class Evaluation:
         "jiang": PST_DEFAULT,
     }
 
+    _MA_DELTAS = (
+        (2, 1),
+        (2, -1),
+        (-2, 1),
+        (-2, -1),
+        (1, 2),
+        (1, -2),
+        (-1, 2),
+        (-1, -2),
+    )
+    _ORTH = ((0, 1), (0, -1), (1, 0), (-1, 0))
+
     @staticmethod
-    def evaluate(board) -> float:
+    def repetition_leaf_score(board: Board) -> float:
+        """搜索中遇到将重演路径时的叶子分：大优时厌战（负分），大劣时接受和棋 (0)。
+
+        与 ``Rules.is_threefold_repetition_draw``（布尔终局）不同，本函数仅用于 Minimax 内部估值。
+        """
+        e = Evaluation.evaluate(board)
+        if e < -200:
+            return 0.0
+        if e > 50:
+            return min(0.0, 50.0 - 0.65 * e)
+        return 0.0
+
+    @staticmethod
+    def _raw_material(board: Board) -> tuple[float, float, float, int]:
+        b = board.board
+        red_m = black_m = 0.0
+        n = 0
+        for color_key in ("red", "black"):
+            for r, c in board.active_pieces.get(color_key, ()):
+                p = b[r][c]
+                if p is None or p.color != color_key:
+                    continue
+                v = float(Evaluation.PIECE_VALUES.get(p.piece_type, 0))
+                n += 1
+                if color_key == "red":
+                    red_m += v
+                else:
+                    black_m += v
+        return red_m, black_m, red_m + black_m, n
+
+    @staticmethod
+    def _ma_mobility(board: Board, sr: int, sc: int, color: str) -> float:
+        b = board.board
+        cnt = 0
+        for dr, dc in Evaluation._MA_DELTAS:
+            er, ec = sr + dr, sc + dc
+            if not (0 <= er < 10 and 0 <= ec < 9):
+                continue
+            tgt = b[er][ec]
+            if tgt is not None and tgt.color == color:
+                continue
+            if Rules._is_valid_ma_move(board, sr, sc, er, ec):
+                cnt += 1
+        return float(cnt * 5)
+
+    @staticmethod
+    def _pao_screen_bonus(board: Board, r: int, c: int, color: str) -> float:
+        b = board.board
+        bonus = 0.0
+        for dr, dc in Evaluation._ORTH:
+            tr, tc = r + dr, c + dc
+            while 0 <= tr < 10 and 0 <= tc < 9:
+                p = b[tr][tc]
+                if p is None:
+                    tr += dr
+                    tc += dc
+                    continue
+                if p.color == color:
+                    bonus += 18.0
+                break
+        return bonus
+
+    @staticmethod
+    def _can_major_attack_square(
+        board: Board, sr: int, sc: int, piece_type: str, color: str, tr: int, tc: int
+    ) -> bool:
+        b = board.board
+        tgt = b[tr][tc]
+        if tgt is not None and tgt.color == color:
+            return False
+        if piece_type == "che":
+            return Rules._is_valid_che_move(board, sr, sc, tr, tc)
+        if piece_type == "ma":
+            return Rules._is_valid_ma_move(board, sr, sc, tr, tc)
+        if piece_type == "pao":
+            return Rules._is_valid_pao_move(board, sr, sc, tr, tc)
+        return False
+
+    @staticmethod
+    def _palace_pressure(board: Board, attacker: str) -> float:
+        b = board.board
+        if attacker == "red":
+            prange = [(r, c) for r in range(0, 3) for c in range(3, 6)]
+        else:
+            prange = [(r, c) for r in range(7, 10) for c in range(3, 6)]
+        for r, c in board.active_pieces.get(attacker, ()):
+            p = b[r][c]
+            if p is None or p.color != attacker or p.piece_type not in Evaluation.MAJOR_TYPES:
+                continue
+            for tr, tc in prange:
+                if Evaluation._can_major_attack_square(board, r, c, p.piece_type, attacker, tr, tc):
+                    return 20.0
+        return 0.0
+
+    @staticmethod
+    def _apply_anti_trading(red_score: float, black_score: float, total_mat: float) -> tuple[float, float]:
+        diff = red_score - black_score
+        deficit = max(0.0, Evaluation._REF_TOTAL_MATERIAL - total_mat)
+        pen = Evaluation._ANTI_TRADE_COEFF * deficit
+        if diff > 50:
+            red_score -= pen
+        elif diff < -50:
+            black_score -= pen
+        return red_score, black_score
+
+    @staticmethod
+    def evaluate(board: Board) -> float:
         """评估函数（纯 Negamax 版）。
 
-        永远返回“当前即将行棋方（board.current_player）”的视角分数：
-        - 轮到红方走：return red_score - black_score
-        - 轮到黑方走：return black_score - red_score
+        永远返回“当前即将行棋方（board.current_player）”的视角分数。
         """
 
         b = board.board
@@ -114,41 +233,63 @@ class Evaluation:
         if red_attack == 0 and black_attack == 0:
             return 0.0
 
+        _, _, total_mat, piece_count = Evaluation._raw_material(board)
+        is_endgame = total_mat <= Evaluation._ENDGAME_MATERIAL or piece_count <= Evaluation._ENDGAME_PIECE_COUNT
+
         red_score = 0.0
         black_score = 0.0
 
-        # 直接遍历 active_pieces，避免 90 格全盘扫描
         for r, c in board.active_pieces.get("red", ()):
             piece = b[r][c]
             if piece is None or piece.color != "red":
                 continue
-            base = float(pv.get(piece.piece_type, 0))
-            pst = pst_map.get(piece.piece_type, Evaluation.PST_DEFAULT)
+            pt = piece.piece_type
+            base = float(pv.get(pt, 0))
+            pst = pst_map.get(pt, Evaluation.PST_DEFAULT)
             red_score += base + float(pst[r][c])
-            if piece.piece_type == "bing" and r <= 4:
-                # 过河兵：每深入对方阵地一行 +20（原约 +10 量级，现加倍强化推进）
-                red_score += float((4 - r) * 20)
-            if piece.piece_type == "che" and r <= 1:
+            if pt == "bing" and r <= 4:
+                step = float((4 - r) * 20)
+                if is_endgame:
+                    step *= 2.5
+                red_score += step
+                if r == 0:
+                    red_score += 80.0
+            if pt == "che" and r <= 1:
                 red_score += 30.0
+            if pt == "ma":
+                red_score += Evaluation._ma_mobility(board, r, c, "red")
+            if pt == "pao":
+                red_score += Evaluation._pao_screen_bonus(board, r, c, "red")
 
         for r, c in board.active_pieces.get("black", ()):
             piece = b[r][c]
             if piece is None or piece.color != "black":
                 continue
-            base = float(pv.get(piece.piece_type, 0))
-            pst = pst_map.get(piece.piece_type, Evaluation.PST_DEFAULT)
-            # 黑方 PST 以红方视角镜像行
+            pt = piece.piece_type
+            base = float(pv.get(pt, 0))
+            pst = pst_map.get(pt, Evaluation.PST_DEFAULT)
             black_score += base + float(pst[9 - r][c])
-            if piece.piece_type == "bing" and r >= 5:
-                black_score += float((r - 5) * 20)
-            if piece.piece_type == "che" and r >= 8:
+            if pt == "bing" and r >= 5:
+                step = float((r - 5) * 20)
+                if is_endgame:
+                    step *= 2.5
+                black_score += step
+                if r == 9:
+                    black_score += 80.0
+            if pt == "che" and r >= 8:
                 black_score += 30.0
+            if pt == "ma":
+                black_score += Evaluation._ma_mobility(board, r, c, "black")
+            if pt == "pao":
+                black_score += Evaluation._pao_screen_bonus(board, r, c, "black")
 
-        # 不再在评估里调用 get_all_moves（原“机动性”项会对每个叶子节点做两次全量走法生成，
-        # 往往占搜索总耗时的大部分；子力+PST 已足够支撑 Minimax 实验对比。）
+        red_score += Evaluation._palace_pressure(board, "red")
+        black_score += Evaluation._palace_pressure(board, "black")
+
+        red_score, black_score = Evaluation._apply_anti_trading(red_score, black_score, total_mat)
+
         opp = "black" if board.current_player == "red" else "red"
         check_bonus = 15.0 if Rules.is_king_in_check(board, opp) else 0.0
         if board.current_player == "red":
             return red_score - black_score + check_bonus
         return black_score - red_score + check_bonus
-
