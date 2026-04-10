@@ -32,6 +32,10 @@ _HISTORY_SORT_CAP = 500_000
 
 # 杀手表按「当前 _alphabeta 的剩余深度 depth」索引；与常见深度上界对齐
 MAX_KILLER_DEPTH = 10
+# 将军延伸：每条根分支上最多「多送」的层数（防止无限延伸）
+_MAX_CHECK_EXTENSIONS = 2
+# 历史表条目数超过此阈值时，在每次迭代加深层开始前做半值老化
+_HISTORY_AGING_THRESHOLD = 10_000
 
 
 class SearchTimeoutException(Exception):
@@ -241,9 +245,16 @@ class MinimaxAI:
             self.history_hashes.append(board.zobrist_hash)
 
         global_best_move: Optional[Tuple[int, int, int, int]] = None
+        gh_len = len(game_history) if game_history else 0
+        midgame_no_random = gh_len > 20
 
         try:
             for current_depth in range(1, self.depth + 1):
+                if len(self.history_table) > _HISTORY_AGING_THRESHOLD:
+                    for k in list(self.history_table.keys()):
+                        self.history_table[k] = self.history_table[k] // 2
+                    self.history_table = {k: v for k, v in self.history_table.items() if v > 0}
+
                 moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
                 self.order_moves(board, moves, current_depth)
 
@@ -276,6 +287,7 @@ class MinimaxAI:
                             -alpha,
                             self.start_time,
                             time_limit,
+                            check_ext_left=_MAX_CHECK_EXTENSIONS,
                         )
                     finally:
                         self.history_hashes.pop()
@@ -291,7 +303,9 @@ class MinimaxAI:
                     if actual_record_score > best_score_so_far:
                         best_score_so_far = actual_record_score
 
-                    if best_score_so_far > float("-inf") and abs(best_score_so_far) >= 300:
+                    if midgame_no_random:
+                        current_tol = 0
+                    elif best_score_so_far > float("-inf") and abs(best_score_so_far) >= 300:
                         current_tol = 0
                     else:
                         current_tol = self.tolerance
@@ -303,7 +317,9 @@ class MinimaxAI:
                 if not any_legal:
                     break  # 根节点无路可走：被将死/困毙
 
-                if best_score_so_far > float("-inf") and abs(best_score_so_far) >= 300:
+                if midgame_no_random:
+                    current_tol = 0
+                elif best_score_so_far > float("-inf") and abs(best_score_so_far) >= 300:
                     current_tol = 0
                 else:
                     current_tol = self.tolerance
@@ -362,6 +378,7 @@ class MinimaxAI:
     ) -> float:
         """静止搜索（Quiescence Search, QS）：仅扩展吃子走法，缓解水平线效应。
 
+        吃子列表经 ``order_moves`` 排序（MVV-LVA + 历史/TT），优先高分枝剪枝。
         返回值与 `_alphabeta` 一致：当前行棋方视角，分越高越好。
         """
         if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
@@ -423,8 +440,13 @@ class MinimaxAI:
         *,
         allow_null: bool = True,
         use_tt: bool = True,
+        check_ext_left: int = _MAX_CHECK_EXTENSIONS,
     ) -> float:
-        """Negamax Alpha-Beta（当前行棋方视角，分越高越好）。"""
+        """Negamax Alpha-Beta（当前行棋方视角，分越高越好）。
+
+        ``check_ext_left``：若子局面轮到走棋方被将军，可令递归深度不减 1（最多延伸
+        ``_MAX_CHECK_EXTENSIONS`` 次/路径），减轻将线剪枝过浅。
+        """
         if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
             return 0.0
         if time_limit is not None and (time.time() - start_time) > time_limit:
@@ -464,6 +486,7 @@ class MinimaxAI:
                     time_limit,
                     allow_null=False,
                     use_tt=False,
+                    check_ext_left=check_ext_left,
                 )
             finally:
                 board.current_player = saved_player
@@ -494,16 +517,24 @@ class MinimaxAI:
                 continue
             any_legal = True
 
+            child_player = board.current_player
+            next_depth = depth - 1
+            next_check_ext = check_ext_left
+            if Rules.is_king_in_check(board, child_player) and check_ext_left > 0:
+                next_depth = depth
+                next_check_ext = check_ext_left - 1
+
             try:
                 score = -self._alphabeta(
                     board,
-                    depth - 1,
+                    next_depth,
                     -beta,
                     -alpha,
                     start_time,
                     time_limit,
                     allow_null=allow_null,
                     use_tt=use_tt,
+                    check_ext_left=next_check_ext,
                 )
             finally:
                 self.history_hashes.pop()
