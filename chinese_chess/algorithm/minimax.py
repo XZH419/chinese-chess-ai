@@ -154,6 +154,22 @@ class MinimaxAI:
         _, _, er, ec = move
         return board.get_piece(er, ec) is not None
 
+    _MAJOR_PIECE_TYPES = frozenset({"che", "ma", "pao"})
+
+    def has_enough_material(self, board, player: str) -> bool:
+        """己方车/马/炮大子数 >= 2 时才认为空步假设较安全，减轻残局 Zugzwang 下的过度剪枝。"""
+        n = 0
+        b = board.board
+        for r, c in board.active_pieces.get(player, ()):
+            p = b[r][c]
+            if p is None or p.color != player:
+                continue
+            if p.piece_type in self._MAJOR_PIECE_TYPES:
+                n += 1
+                if n >= 2:
+                    return True
+        return False
+
     def order_moves(
         self, board, moves: List[Tuple[int, int, int, int]], depth: int
     ) -> None:
@@ -224,7 +240,10 @@ class MinimaxAI:
                 moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
                 self.order_moves(board, moves, current_depth)
 
+                alpha = float("-inf")
+                beta = float("inf")
                 scored_moves: List[Tuple[float, Tuple[int, int, int, int]]] = []
+                best_score_so_far = float("-inf")
                 any_legal = False
 
                 for move in moves:
@@ -246,8 +265,8 @@ class MinimaxAI:
                         score = -self._alphabeta(
                             board,
                             current_depth - 1,
-                            float("-inf"),
-                            float("inf"),
+                            -beta,
+                            -alpha,
                             self.start_time,
                             time_limit,
                         )
@@ -255,20 +274,49 @@ class MinimaxAI:
                         self.history_hashes.pop()
                         board.undo_move(*move, captured)
 
-                    scored_moves.append((score, move))
+                    # Fail-Low / 窗口剪枝返回的界值：若已不优于当前 alpha，不可信为实分，禁止进随机池
+                    actual_record_score = score
+                    if score <= alpha:
+                        actual_record_score = float("-inf")
+
+                    scored_moves.append((actual_record_score, move))
+
+                    if actual_record_score > best_score_so_far:
+                        best_score_so_far = actual_record_score
+
+                    if best_score_so_far > float("-inf") and abs(best_score_so_far) >= 300:
+                        current_tol = 0
+                    else:
+                        current_tol = self.tolerance
+
+                    new_alpha = best_score_so_far - current_tol
+                    if new_alpha > alpha:
+                        alpha = new_alpha
 
                 if not any_legal:
                     break  # 根节点无路可走：被将死/困毙
 
-                scored_moves.sort(key=lambda x: x[0], reverse=True)
-                max_score = scored_moves[0][0]
+                if best_score_so_far > float("-inf") and abs(best_score_so_far) >= 300:
+                    current_tol = 0
+                else:
+                    current_tol = self.tolerance
+
+                finite_scored = [(s, m) for s, m in scored_moves if s > float("-inf")]
+                if not finite_scored:
+                    break
+
                 if not self.stochastic:
-                    current_best_move = scored_moves[0][1]
+                    finite_scored.sort(key=lambda x: x[0], reverse=True)
+                    max_score = finite_scored[0][0]
+                    current_best_move = finite_scored[0][1]
                     root_tt_score = max_score
                 else:
                     near_best = [
-                        (s, m) for s, m in scored_moves if s >= max_score - self.tolerance
+                        (s, m)
+                        for s, m in scored_moves
+                        if s > float("-inf") and s >= best_score_so_far - current_tol
                     ]
+                    near_best.sort(key=lambda x: x[0], reverse=True)
                     pool = near_best[: self.top_k]
                     picked = random.choice(pool)
                     current_best_move = picked[1]
@@ -383,8 +431,14 @@ class MinimaxAI:
                 self._tt_hits += 1
                 return tt_hit
 
+        # Null Move Pruning：深水区 (depth>=5)、非将军、己方大子充足时才探测，减轻残局 Zugzwang 误剪。
         player = board.current_player
-        if allow_null and depth >= 3 and not Rules.is_king_in_check(board, player):
+        if (
+            allow_null
+            and depth >= 5
+            and not Rules.is_king_in_check(board, player)
+            and self.has_enough_material(board, player)
+        ):
             R = 2
             reduced_depth = depth - 1 - R
             if reduced_depth < 0:
