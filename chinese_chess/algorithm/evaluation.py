@@ -9,8 +9,18 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 from chinese_chess.model.board import Board
 from chinese_chess.model.rules import Rules
+
+# 黑方九宫（棋盘上方）、红方九宫（棋盘下方），列 3–5；用于与伪合法落点集合 O(1) 求交
+BLACK_PALACE_SQUARES: frozenset[tuple[int, int]] = frozenset(
+    (r, c) for r in range(0, 3) for c in range(3, 6)
+)
+RED_PALACE_SQUARES: frozenset[tuple[int, int]] = frozenset(
+    (r, c) for r in range(7, 10) for c in range(3, 6)
+)
 
 
 class Evaluation:
@@ -164,36 +174,30 @@ class Evaluation:
         return bonus
 
     @staticmethod
-    def _can_major_attack_square(
-        board: Board, sr: int, sc: int, piece_type: str, color: str, tr: int, tc: int
-    ) -> bool:
-        b = board.board
-        tgt = b[tr][tc]
-        if tgt is not None and tgt.color == color:
-            return False
-        if piece_type == "che":
-            return Rules._is_valid_che_move(board, sr, sc, tr, tc)
-        if piece_type == "ma":
-            return Rules._is_valid_ma_move(board, sr, sc, tr, tc)
-        if piece_type == "pao":
-            return Rules._is_valid_pao_move(board, sr, sc, tr, tc)
-        return False
+    def _palace_pressure(board: Board, player: str) -> float:
+        """大子伪合法落点与敌方九宫的交集规模 × 分；每方一次全量 ``get_pseudo_legal_moves``。"""
+        enemy_palace = BLACK_PALACE_SQUARES if player == "red" else RED_PALACE_SQUARES
+        dest_by_start: defaultdict[tuple[int, int], set[tuple[int, int]]] = defaultdict(set)
+        for sr, sc, er, ec in Rules.get_pseudo_legal_moves(board, player):
+            dest_by_start[(sr, sc)].add((er, ec))
 
-    @staticmethod
-    def _palace_pressure(board: Board, attacker: str) -> float:
+        pressure = 0.0
         b = board.board
-        if attacker == "red":
-            prange = [(r, c) for r in range(0, 3) for c in range(3, 6)]
-        else:
-            prange = [(r, c) for r in range(7, 10) for c in range(3, 6)]
-        for r, c in board.active_pieces.get(attacker, ()):
+        for r, c in board.active_pieces.get(player, ()):
             p = b[r][c]
-            if p is None or p.color != attacker or p.piece_type not in Evaluation.MAJOR_TYPES:
+            if p is None or p.color != player:
                 continue
-            for tr, tc in prange:
-                if Evaluation._can_major_attack_square(board, r, c, p.piece_type, attacker, tr, tc):
-                    return 20.0
-        return 0.0
+            pt = p.piece_type
+            if pt not in Evaluation.MAJOR_TYPES:
+                continue
+            if pt == "ma":
+                if player == "red" and r >= 5:
+                    continue
+                if player == "black" and r <= 4:
+                    continue
+            hits = dest_by_start.get((r, c), set()) & enemy_palace
+            pressure += len(hits) * 20.0
+        return pressure
 
     @staticmethod
     def _apply_anti_trading(red_score: float, black_score: float, total_mat: float) -> tuple[float, float]:
