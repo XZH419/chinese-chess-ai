@@ -4,13 +4,16 @@
 - 子力价值：车900，炮450，马400，兵100，士/相200
 - 位置分：Piece-Square Tables（PST）
 - 统一评分：score = 红(子力+位置) - 黑(子力+位置)
-- 返回：基于调用方视角（is_maximizing_player）返回分数
+- 返回：当前行棋方视角；双方均无车/马/炮/兵时视为物质和棋，直接 0 分
 """
 
 from __future__ import annotations
 
 
 class Evaluation:
+    # 可参与将杀/实质性进攻的子力（仅剩将、士、象视为无法将死 → 评估为和）
+    ATTACKING_PIECE_TYPES = frozenset({"che", "ma", "pao", "bing"})
+
     # 基础子力价值（单位分）
     PIECE_VALUES = {
         "che": 900,
@@ -92,6 +95,22 @@ class Evaluation:
         b = board.board
         pv = Evaluation.PIECE_VALUES
         pst_map = Evaluation.PST_MAP
+        attacking = Evaluation.ATTACKING_PIECE_TYPES
+
+        red_attack = 0
+        black_attack = 0
+        for color_key in ("red", "black"):
+            for r, c in board.active_pieces.get(color_key, ()):
+                p = b[r][c]
+                if p is None or p.color != color_key:
+                    continue
+                if p.piece_type in attacking:
+                    if color_key == "red":
+                        red_attack += 1
+                    else:
+                        black_attack += 1
+        if red_attack == 0 and black_attack == 0:
+            return 0.0
 
         red_score = 0.0
         black_score = 0.0

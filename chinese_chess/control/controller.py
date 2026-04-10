@@ -37,6 +37,9 @@ class MoveOutcome:
     ok: bool
     message: str = ""
     captured: object = None
+    # 仅当 ok=True 且本步执行后局面已终局时有意义；winner=None 表示和棋（如三次重复）
+    game_over: bool = False
+    winner: Optional[str] = None
 
 
 class GameController:
@@ -83,7 +86,9 @@ class GameController:
             return MoveOutcome(ok=False, message="illegal move")
         captured = self.board.apply_move(sr, sc, er, ec)
         self.game_history_hashes.append(self.board.zobrist_hash)
-        return MoveOutcome(ok=True, captured=captured)
+        over = Rules.is_game_over(self.board, position_history=self.game_history_hashes)
+        win: Optional[str] = Rules.winner(self.board) if over else None
+        return MoveOutcome(ok=True, captured=captured, game_over=over, winner=win)
 
     def undo_move(self, move: Tuple[int, int, int, int], captured) -> None:
         sr, sc, er, ec = move

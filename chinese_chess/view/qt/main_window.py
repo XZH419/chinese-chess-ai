@@ -17,13 +17,14 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from chinese_chess.control.controller import GameController
+from chinese_chess.control.controller import GameController, MoveOutcome
 
 
 Move = Tuple[int, int, int, int]
@@ -349,6 +350,19 @@ class MainWindow(QMainWindow):
 
         right.addStretch(1)
 
+    def _finalize_after_legal_move(self, outcome: MoveOutcome) -> None:
+        """落子已成功写入棋盘后：刷新 UI、处理和棋弹窗、抬高 run_id 以丢弃迟到的 AI 信号。"""
+        if not outcome.ok:
+            return
+        self._refresh_status()
+        if outcome.game_over:
+            self._run_id += 1
+            if outcome.winner is None:
+                msg = "游戏结束：和棋（死局或三次重复）！"
+                self.append_log(msg)
+                QMessageBox.information(self, "对局结束", msg)
+        self.check_and_run_ai()
+
     def append_log(self, text: str) -> None:
         """向右侧 log_console 追加一条带时间戳的日志，并自动滚动到底部。"""
         ts = datetime.now().strftime("%H:%M:%S")
@@ -372,7 +386,7 @@ class MainWindow(QMainWindow):
             elif winner == "black":
                 self.status_label.setText("黑方获胜！")
             else:
-                self.status_label.setText("游戏结束")
+                self.status_label.setText("游戏结束：和棋（死局或三次重复）！")
             return
 
         player = result["current_player"]
@@ -459,9 +473,7 @@ class MainWindow(QMainWindow):
         self.append_log(f"[UI] 玩家落子: {move}")
         # Animate based on model coordinates; do NOT compute rules here.
         self.board_view.animate_move(move)
-        self._refresh_status()
-        # 玩家走完后，触发下一手（可能是黑方 AI，也可能是红方 AI vs AI 场景）
-        self.check_and_run_ai()
+        self._finalize_after_legal_move(outcome)
 
     def check_and_run_ai(self) -> None:
         """接力棒机制：如果当前回合是 AI，则自动启动计算并落子。"""
@@ -524,14 +536,13 @@ class MainWindow(QMainWindow):
         self.append_log("[UI] AI 信号接收完成，执行落子。")
         self.append_log("--------------------------")
         if move:
-            self.controller.apply_move(move, player=self.controller.board.current_player)
+            outcome = self.controller.apply_move(move, player=self.controller.board.current_player)
             self.board_view.animate_move(move)
+            self._finalize_after_legal_move(outcome)
         else:
             # AI 无合法走法（困毙/将死由 Rules.winner 判定）
-            pass
-        self._refresh_status()
-        # 极速接力：本方落子后立刻轮到下一方计算
-        self.check_and_run_ai()
+            self._refresh_status()
+            self.check_and_run_ai()
 
 
 if __name__ == "__main__":
