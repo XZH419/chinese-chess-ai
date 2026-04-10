@@ -486,7 +486,9 @@ class MainWindow(QMainWindow):
 
         outcome = self.controller.try_apply_player_move(move, player=self.human_color)
         if not outcome.ok:
-            self.status_label.setText("无效走子")
+            self.status_label.setText(outcome.message or "无效走子")
+            if outcome.message:
+                self.append_log(f"[UI] {outcome.message}")
             return
 
         print(f"[UI] player move applied: {move}")

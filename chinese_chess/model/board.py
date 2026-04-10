@@ -35,9 +35,12 @@ class Board:
         self.black_king_pos: Optional[Tuple[int, int]] = (0, 4)
         # Zobrist 局面键：由走子异或增量维护；置换表可直接用此值
         self.zobrist_hash: int = 0
+        # 当前对局路径上各 Zobrist 键出现次数（apply 增、undo 减；O(1) 查询重复）
+        self.state_counts: Dict[int, int] = {}
         self.init_board()
 
     def init_board(self):
+        self.state_counts.clear()
         self.active_pieces["red"].clear()
         self.active_pieces["black"].clear()
         # 初始化黑方棋子在上方。
@@ -88,6 +91,10 @@ class Board:
                 if p is not None:
                     self.active_pieces[p.color].add((r, c))
         self.zobrist_hash = zobrist.full_hash(self)
+        self.state_counts[self.zobrist_hash] = 1
+
+    def get_repetition_count(self) -> int:
+        return self.state_counts.get(self.zobrist_hash, 0)
 
     def get_piece(self, row, col):
         if 0 <= row < self.rows and 0 <= col < self.cols:
@@ -147,10 +154,18 @@ class Board:
             else:
                 self.black_king_pos = (end_row, end_col)
         self.current_player = "black" if self.current_player == "red" else "red"
+        h = self.zobrist_hash
+        self.state_counts[h] = self.state_counts.get(h, 0) + 1
         return captured
 
     def undo_move(self, start_row, start_col, end_row, end_col, captured):
         # 撤销刚才的走子，还原被吃棋子和当前执子方。
+        h_leave = self.zobrist_hash
+        c = self.state_counts.get(h_leave, 0)
+        if c <= 1:
+            self.state_counts.pop(h_leave, None)
+        else:
+            self.state_counts[h_leave] = c - 1
         piece = self.board[end_row][end_col]
         sq_s = start_row * 9 + start_col
         sq_e = end_row * 9 + end_col
@@ -189,6 +204,7 @@ class Board:
         new_board.red_king_pos = self.red_king_pos
         new_board.black_king_pos = self.black_king_pos
         new_board.zobrist_hash = self.zobrist_hash
+        new_board.state_counts = dict(self.state_counts)
         new_board.active_pieces = {
             "red": set(self.active_pieces["red"]),
             "black": set(self.active_pieces["black"]),

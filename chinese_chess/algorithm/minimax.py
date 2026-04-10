@@ -387,6 +387,8 @@ class MinimaxAI:
         alpha: float,
         beta: float,
         depth_limit: int = 4,
+        *,
+        skip_rep_count: bool = False,
     ) -> float:
         """静止搜索（Quiescence Search, QS）：仅扩展吃子走法，缓解水平线效应。
 
@@ -395,6 +397,13 @@ class MinimaxAI:
         """
         if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
             return Evaluation.repetition_leaf_score(board)
+
+        if not skip_rep_count:
+            player = board.current_player
+            if board.get_repetition_count() >= 3:
+                if Rules.is_king_in_check(board, player):
+                    return 100000.0
+                return 10.0
 
         if depth_limit <= 0:
             self._nodes += 1
@@ -429,7 +438,9 @@ class MinimaxAI:
                 continue
 
             try:
-                score = -self._quiescence_search(board, -beta, -alpha, depth_limit - 1)
+                score = -self._quiescence_search(
+                    board, -beta, -alpha, depth_limit - 1, skip_rep_count=skip_rep_count
+                )
             finally:
                 self.history_hashes.pop()
                 board.undo_move(*move, captured)
@@ -453,12 +464,20 @@ class MinimaxAI:
         allow_null: bool = True,
         use_tt: bool = True,
         check_ext_left: int = _MAX_CHECK_EXTENSIONS,
+        skip_rep_count: bool = False,
     ) -> float:
         """Negamax Alpha-Beta（当前行棋方视角，分越高越好）。
 
         ``check_ext_left``：若子局面轮到走棋方被将军，可令递归深度不减 1（最多延伸
         ``_MAX_CHECK_EXTENSIONS`` 次/路径），减轻将线剪枝过浅。
         """
+        if not skip_rep_count:
+            player = board.current_player
+            if board.get_repetition_count() >= 3:
+                if Rules.is_king_in_check(board, player):
+                    return 100000.0
+                return 10.0
+
         if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
             return Evaluation.repetition_leaf_score(board)
         if time_limit is not None and (time.time() - start_time) > time_limit:
@@ -499,6 +518,7 @@ class MinimaxAI:
                     allow_null=False,
                     use_tt=False,
                     check_ext_left=check_ext_left,
+                    skip_rep_count=True,
                 )
             finally:
                 board.current_player = saved_player
@@ -507,7 +527,7 @@ class MinimaxAI:
                 return beta
 
         if depth == 0:
-            return self._quiescence_search(board, alpha, beta)
+            return self._quiescence_search(board, alpha, beta, skip_rep_count=skip_rep_count)
 
         moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
         self.order_moves(board, moves, depth)

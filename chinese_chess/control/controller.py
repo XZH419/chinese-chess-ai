@@ -107,7 +107,19 @@ class GameController:
         sr, sc, er, ec = move
         if not Rules.is_valid_move(self.board, sr, sc, er, ec, player=player):
             return MoveOutcome(ok=False, message="illegal move")
+        mover = self.board.current_player
         captured = self.board.apply_move(sr, sc, er, ec)
+        human_mover = (mover == "red" and self.red_agent is None) or (
+            mover == "black" and self.black_agent is None
+        )
+        if human_mover and self.board.get_repetition_count() >= 3:
+            opponent = self.board.current_player
+            if Rules.is_king_in_check(self.board, opponent):
+                msg = "警告：禁止长将！请变着。"
+            else:
+                msg = "警告：检测到违规长捉或无理重复，请变着！"
+            self.board.undo_move(sr, sc, er, ec, captured)
+            return MoveOutcome(ok=False, message=msg)
         self.game_history_hashes.append(self.board.zobrist_hash)
         over = Rules.is_game_over(self.board, position_history=self.game_history_hashes)
         win: Optional[str] = Rules.winner(self.board) if over else None
