@@ -14,6 +14,7 @@ from chinese_chess.model import zobrist
 from chinese_chess.model.rules import Rules
 
 from .evaluation import Evaluation
+from .opening_book import OPENING_BOOK
 
 # 置换表边界类型（与当前 alpha/beta 窗口配合使用）
 _TT_EXACT = 0  # 精确值：alpha < score < beta
@@ -237,6 +238,30 @@ class MinimaxAI:
 
         ``time_limit`` 仅为接口兼容保留，本实现中不在根迭代加深路径上启用。
         """
+        gh_book = game_history if game_history is not None else []
+        if len(gh_book) < 30:
+            zkey = board.zobrist_hash
+            if zkey in OPENING_BOOK:
+                book_moves = OPENING_BOOK[zkey]
+                if book_moves:
+                    valid = [
+                        m
+                        for m in book_moves
+                        if Rules.is_valid_move(board, m[0], m[1], m[2], m[3])
+                    ]
+                    if valid:
+                        picked = random.choice(valid)
+                        if self.verbose:
+                            print(f"命中开局库！瞬间出棋: {picked}")
+                        self.last_stats = {
+                            "depth": int(self.depth),
+                            "time_taken": 0.0,
+                            "nodes_evaluated": 0,
+                            "tt_hits": 0,
+                            "opening_book": True,
+                        }
+                        return picked
+
         bench_t0 = time.time()
         self._nodes = 0
         self._tt_hits = 0
