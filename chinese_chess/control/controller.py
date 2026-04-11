@@ -93,7 +93,8 @@ class GameController:
     def can_move(self, move: Tuple[int, int, int, int], player: Optional[str] = None) -> bool:
         """Check if a move is legal for player on current board."""
         sr, sc, er, ec = move
-        return Rules.is_valid_move(self.board, sr, sc, er, ec, player=player)
+        ok, _ = Rules.is_valid_move(self.board, sr, sc, er, ec, player=player)
+        return ok
 
     # --- Stable interface for Views (GUI/CLI) ---
     def try_apply_player_move(
@@ -105,8 +106,10 @@ class GameController:
     def apply_move(self, move: Tuple[int, int, int, int], player: Optional[str] = None) -> MoveOutcome:
         """Apply a move if legal, otherwise return a failure outcome."""
         sr, sc, er, ec = move
-        if not Rules.is_valid_move(self.board, sr, sc, er, ec, player=player):
-            return MoveOutcome(ok=False, message="illegal move")
+        ok, reason = Rules.is_valid_move(self.board, sr, sc, er, ec, player=player)
+        if not ok:
+            detail = reason or "未知原因"
+            return MoveOutcome(ok=False, message=f"非法走法：{detail}")
         mover = self.board.current_player
         captured = self.board.apply_move(sr, sc, er, ec)
         human_mover = (mover == "red" and self.red_agent is None) or (

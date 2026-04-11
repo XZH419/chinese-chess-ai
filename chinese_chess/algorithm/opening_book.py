@@ -36,7 +36,7 @@ def _sequences_to_zobrist(seq_book: Dict[Tuple[Move4, ...], List[Move4]]) -> Dic
         b = Board()
         ok = True
         for m in seq:
-            if not Rules.is_valid_move(b, m[0], m[1], m[2], m[3]):
+            if not Rules.is_valid_move(b, m[0], m[1], m[2], m[3])[0]:
                 ok = False
                 break
             b.apply_move(*m)
@@ -47,7 +47,7 @@ def _sequences_to_zobrist(seq_book: Dict[Tuple[Move4, ...], List[Move4]]) -> Dic
         for mv in moves:
             if mv in bucket:
                 continue
-            if Rules.is_valid_move(b, mv[0], mv[1], mv[2], mv[3]):
+            if Rules.is_valid_move(b, mv[0], mv[1], mv[2], mv[3])[0]:
                 bucket.append(mv)
     return out
 

@@ -15,6 +15,19 @@ from typing import Iterator, Optional, Tuple
 
 from .board import Board
 
+# 非法走法说明（供 GUI / Controller 展示）
+_MSG_FRIENDLY_FIRE = "友军误伤"
+_MSG_BING_BACK = "士卒不得后退"
+_MSG_BING_NO_SIDE = "士卒过河前不得横移"
+_MSG_MA_BLOCKED = "蹩马腿"
+_MSG_XIANG_EYE = "塞象眼"
+_MSG_PAO_BAD = "炮无炮架或非法翻山"
+_MSG_BAD_GEOMETRY = "棋子走法不合规"
+_MSG_NO_CAPTURE_KING = "不得吃掉对方老将"
+_MSG_KINGS_FACE = "王不见王"
+_MSG_IN_CHECK_STILL = "正在被将军，请先解将"
+_MSG_SELF_CHECK = "由于飞将或未解将，行动后将处于被将军状态"
+
 
 class Rules:
     """All rules as static methods to avoid stateful coupling."""
@@ -28,11 +41,10 @@ class Rules:
         end_col,
         player=None,
         check_legality=True,
-    ):
-        """检查指定棋子走子是否合法（严格版）。
+    ) -> Tuple[bool, str]:
+        """检查指定棋子走子是否合法；返回 ``(是否合法, 错误原因)``。
 
-        如果 check_legality 为 True，还会验证走子后是否导致己方将帅被将军，
-        或者是否出现对面将帅见面的非法局面（**白脸将拦截**）。
+        合法时为 ``(True, "")``。``check_legality=False`` 时仅做几何与吃子规则，不做将军/飞将模拟。
         """
 
         player = player or board.current_player
@@ -42,174 +54,158 @@ class Rules:
             and 0 <= end_row < 10
             and 0 <= end_col < 9
         ):
-            return False
+            return False, _MSG_BAD_GEOMETRY
 
         b = board.board
         piece = b[start_row][start_col]
         if not piece or piece.color != player:
-            return False
+            return False, _MSG_BAD_GEOMETRY
 
         target = b[end_row][end_col]
         if target and target.color == piece.color:
-            return False
+            return False, _MSG_FRIENDLY_FIRE
+        if target is not None and target.piece_type == "jiang":
+            return False, _MSG_NO_CAPTURE_KING
 
-        if piece.piece_type == "jiang":
-            valid = Rules._is_valid_jiang_move(
-                board, start_row, start_col, end_row, end_col, player
-            )
-        elif piece.piece_type == "shi":
-            valid = Rules._is_valid_shi_move(
-                board, start_row, start_col, end_row, end_col, player
-            )
-        elif piece.piece_type == "xiang":
-            valid = Rules._is_valid_xiang_move(
-                board, start_row, start_col, end_row, end_col, player
-            )
-        elif piece.piece_type == "ma":
-            valid = Rules._is_valid_ma_move(board, start_row, start_col, end_row, end_col)
-        elif piece.piece_type == "che":
-            valid = Rules._is_valid_che_move(board, start_row, start_col, end_row, end_col)
-        elif piece.piece_type == "pao":
-            valid = Rules._is_valid_pao_move(board, start_row, start_col, end_row, end_col)
-        elif piece.piece_type == "bing":
-            valid = Rules._is_valid_bing_move(
-                board, start_row, start_col, end_row, end_col, player
-            )
-        else:
-            valid = False
-
-        if not valid:
-            return False
+        geom_err = Rules._geometry_error(board, piece, start_row, start_col, end_row, end_col, player)
+        if geom_err is not None:
+            return False, geom_err
 
         if not check_legality:
-            return True
+            return True, ""
 
-        # ===== 关键：利用核心 Board 状态机进行无损模拟 =====
-        # 使用 apply_move 可以确保 grid, active_pieces, king_pos, zobrist_hash 全部精准同步
+        was_in_check = Rules.is_king_in_check(board, player)
         captured = board.apply_move(start_row, start_col, end_row, end_col)
-
-        # apply_move 会将 current_player 切换给对手
-        # 但我们需要验证的是原本走子的 player（即传参进来的 player）是否处于被将军状态
         kings_facing = Rules._jiang_face_to_face(board)
-        in_check = Rules.is_king_in_check(board, player)
-
+        still_in_check = Rules.is_king_in_check(board, player)
         board.undo_move(start_row, start_col, end_row, end_col, captured)
 
-        if kings_facing or in_check:
-            return False
-
-        return True
-
-    @staticmethod
-    def _is_valid_jiang_move(board: Board, sr, sc, er, ec, player):
-        # 将/帅：九宫格内直走一步（九宫格限制）
-        if abs(sr - er) + abs(sc - ec) != 1:
-            return False
-        if player == "red":
-            return 7 <= er <= 9 and 3 <= ec <= 5
-        return 0 <= er <= 2 and 3 <= ec <= 5
+        if kings_facing:
+            return False, _MSG_KINGS_FACE
+        if still_in_check:
+            if was_in_check:
+                return False, _MSG_IN_CHECK_STILL
+            return False, _MSG_SELF_CHECK
+        return True, ""
 
     @staticmethod
-    def _is_valid_shi_move(board: Board, sr, sc, er, ec, player):
-        # 士：九宫格内斜走一步（九宫格限制）
-        if abs(sr - er) != 1 or abs(sc - ec) != 1:
-            return False
-        if player == "red":
-            return 7 <= er <= 9 and 3 <= ec <= 5
-        return 0 <= er <= 2 and 3 <= ec <= 5
-
-    @staticmethod
-    def _is_valid_xiang_move(board: Board, sr, sc, er, ec, player):
-        # 象：
-        # - 走“田”字（行列各走 2）
-        # - **塞象眼**：象眼（中点）被占则不能走
-        # - **不能过河**：红象不可到 0-4 行，黑象不可到 5-9 行（按本实现坐标系）
-        if abs(sr - er) != 2 or abs(sc - ec) != 2:
-            return False
-        eye_r = (sr + er) // 2
-        eye_c = (sc + ec) // 2
-        if board.board[eye_r][eye_c]:
-            return False
-        if player == "red":
-            return er >= 5
-        return er <= 4
-
-    @staticmethod
-    def _is_valid_ma_move(board: Board, sr, sc, er, ec):
-        # 马：
-        # - 走“日”字（2,1）
-        # - **蹩马脚**：马腿（中间格）被占则不能走
-        dr = abs(sr - er)
-        dc = abs(sc - ec)
-        if not ((dr == 2 and dc == 1) or (dr == 1 and dc == 2)):
-            return False
-        if dr == 2:
-            leg_r = (sr + er) // 2
-            leg_c = sc
-        else:
-            leg_r = sr
-            leg_c = (sc + ec) // 2
-        if board.board[leg_r][leg_c]:
-            return False
-        return True
-
-    @staticmethod
-    def _is_valid_che_move(board: Board, sr, sc, er, ec):
-        # 车直线移动，路径上不能有阻挡棋子。
-        if sr != er and sc != ec:
-            return False
+    def _geometry_error(
+        board: Board, piece, sr: int, sc: int, er: int, ec: int, player: str
+    ) -> Optional[str]:
+        """几何与路径规则；合法返回 ``None``。"""
+        pt = piece.piece_type
         b = board.board
-        if sr == er:
-            step = 1 if ec > sc else -1
-            for c in range(sc + step, ec, step):
-                if b[sr][c]:
-                    return False
-        else:
-            step = 1 if er > sr else -1
-            for r in range(sr + step, er, step):
-                if b[r][sc]:
-                    return False
-        return True
+
+        if pt == "jiang":
+            if abs(sr - er) + abs(sc - ec) != 1:
+                return _MSG_BAD_GEOMETRY
+            if player == "red":
+                if not (7 <= er <= 9 and 3 <= ec <= 5):
+                    return _MSG_BAD_GEOMETRY
+            elif not (0 <= er <= 2 and 3 <= ec <= 5):
+                return _MSG_BAD_GEOMETRY
+            return None
+
+        if pt == "shi":
+            if abs(sr - er) != 1 or abs(sc - ec) != 1:
+                return _MSG_BAD_GEOMETRY
+            if player == "red":
+                if not (7 <= er <= 9 and 3 <= ec <= 5):
+                    return _MSG_BAD_GEOMETRY
+            elif not (0 <= er <= 2 and 3 <= ec <= 5):
+                return _MSG_BAD_GEOMETRY
+            return None
+
+        if pt == "xiang":
+            if abs(sr - er) != 2 or abs(sc - ec) != 2:
+                return _MSG_BAD_GEOMETRY
+            eye_r = (sr + er) // 2
+            eye_c = (sc + ec) // 2
+            if b[eye_r][eye_c]:
+                return _MSG_XIANG_EYE
+            if player == "red":
+                if er < 5:
+                    return _MSG_BAD_GEOMETRY
+            elif er > 4:
+                return _MSG_BAD_GEOMETRY
+            return None
+
+        if pt == "ma":
+            dr = abs(sr - er)
+            dc = abs(sc - ec)
+            if not ((dr == 2 and dc == 1) or (dr == 1 and dc == 2)):
+                return _MSG_BAD_GEOMETRY
+            if dr == 2:
+                leg_r, leg_c = (sr + er) // 2, sc
+            else:
+                leg_r, leg_c = sr, (sc + ec) // 2
+            if b[leg_r][leg_c]:
+                return _MSG_MA_BLOCKED
+            return None
+
+        if pt == "che":
+            if sr != er and sc != ec:
+                return _MSG_BAD_GEOMETRY
+            if sr == er:
+                step = 1 if ec > sc else -1
+                for c in range(sc + step, ec, step):
+                    if b[sr][c]:
+                        return _MSG_BAD_GEOMETRY
+            else:
+                step = 1 if er > sr else -1
+                for r in range(sr + step, er, step):
+                    if b[r][sc]:
+                        return _MSG_BAD_GEOMETRY
+            return None
+
+        if pt == "pao":
+            if sr != er and sc != ec:
+                return _MSG_BAD_GEOMETRY
+            tgt = b[er][ec]
+            count = 0
+            if sr == er:
+                step = 1 if ec > sc else -1
+                for c in range(sc + step, ec, step):
+                    if b[sr][c]:
+                        count += 1
+            else:
+                step = 1 if er > sr else -1
+                for r in range(sr + step, er, step):
+                    if b[r][sc]:
+                        count += 1
+            if tgt is not None:
+                if count != 1:
+                    return _MSG_PAO_BAD
+            elif count != 0:
+                return _MSG_PAO_BAD
+            return None
+
+        if pt == "bing":
+            return Rules._bing_geometry_error(sr, sc, er, ec, player)
+
+        return _MSG_BAD_GEOMETRY
 
     @staticmethod
-    def _is_valid_pao_move(board: Board, sr, sc, er, ec):
-        # 炮：
-        # - 不吃子：直线走，路径无子
-        # - 吃子：直线走，且中间必须**恰好隔一个子（炮架）**
-        if sr != er and sc != ec:
-            return False
-        b = board.board
-        target = b[er][ec]
-        count = 0
-        if sr == er:
-            step = 1 if ec > sc else -1
-            for c in range(sc + step, ec, step):
-                if b[sr][c]:
-                    count += 1
-        else:
-            step = 1 if er > sr else -1
-            for r in range(sr + step, er, step):
-                if b[r][sc]:
-                    count += 1
-        if target:
-            return count == 1
-        return count == 0
-
-    @staticmethod
-    def _is_valid_bing_move(board: Board, sr, sc, er, ec, player):
-        # 兵/卒向前一步，过河后可以横着走一步。
+    def _bing_geometry_error(sr: int, sc: int, er: int, ec: int, player: str) -> Optional[str]:
         if player == "red":
             if er > sr:
-                return False
-            if sr <= 4:  # 红兵过河后允许横走。
-                return (er == sr - 1 and sc == ec) or (er == sr and abs(sc - ec) == 1)
-            return er == sr - 1 and sc == ec
-        else:
-            if er < sr:
-                return False
-            if sr >= 5:  # 黑卒过河后允许横走。
-                return (er == sr + 1 and sc == ec) or (er == sr and abs(sc - ec) == 1)
-            return er == sr + 1 and sc == ec
+                return _MSG_BING_BACK
+            if er == sr and abs(ec - sc) == 1:
+                if sr > 4:
+                    return _MSG_BING_NO_SIDE
+                return None
+            if er == sr - 1 and ec == sc:
+                return None
+            return _MSG_BAD_GEOMETRY
+        if er < sr:
+            return _MSG_BING_BACK
+        if er == sr and abs(ec - sc) == 1:
+            if sr < 5:
+                return _MSG_BING_NO_SIDE
+            return None
+        if er == sr + 1 and ec == sc:
+            return None
+        return _MSG_BAD_GEOMETRY
 
     @staticmethod
     def _jiang_face_to_face(board: Board):
@@ -241,7 +237,7 @@ class Rules:
                 continue
             candidates = Rules._candidate_targets(board, r, c, piece.piece_type, player)
             for er, ec in candidates:
-                if Rules.is_valid_move(
+                ok, _ = Rules.is_valid_move(
                     board,
                     r,
                     c,
@@ -249,7 +245,8 @@ class Rules:
                     ec,
                     player=player,
                     check_legality=validate_self_check,
-                ):
+                )
+                if ok:
                     moves.append((r, c, er, ec))
         return moves
 
@@ -321,11 +318,20 @@ class Rules:
         return cand
 
     @staticmethod
+    def _pseudo_capture_ok(cell, player: str) -> bool:
+        """伪合法生成用：可落子格为空，或为可吃的敌方子（禁止吃将）。"""
+        if cell is None:
+            return True
+        if cell.color == player:
+            return False
+        return cell.piece_type != "jiang"
+
+    @staticmethod
     def get_pseudo_legal_moves(board: Board, player: str) -> Iterator[Tuple[int, int, int, int]]:
         """伪合法走法生成（仅几何与吃子颜色），供 AI 搜索批量过滤。
 
-        不调用 ``get_piece`` / ``is_valid_move``；目标格用 ``b[nr][nc]`` 与 ``color`` 直判；不校验自将、白脸将。
-        产出 ``(r, c, nr, nc)``，与 ``get_all_moves`` 元组格式一致。
+        不调用 ``get_piece`` / ``is_valid_move``；目标格用 ``b[nr][nc]`` 直判；不吃将；
+        不校验自将、白脸将。完整合法性仍由根节点 ``is_valid_move`` / 搜索内 ``is_king_in_check`` 保证。
         """
         b = board.board
 
@@ -343,7 +349,7 @@ class Rules:
                         if cell is None:
                             yield (r, c, nr, nc)
                         else:
-                            if cell.color != player:
+                            if Rules._pseudo_capture_ok(cell, player):
                                 yield (r, c, nr, nc)
                             break
                         nr += dr
@@ -362,7 +368,7 @@ class Rules:
                             if not seen_screen:
                                 seen_screen = True
                             else:
-                                if cell.color != player:
+                                if Rules._pseudo_capture_ok(cell, player):
                                     yield (r, c, nr, nc)
                                 break
                         nr += dr
@@ -391,7 +397,7 @@ class Rules:
                     if not (0 <= nr < 10 and 0 <= nc < 9):
                         continue
                     dest = b[nr][nc]
-                    if dest is None or dest.color != player:
+                    if Rules._pseudo_capture_ok(dest, player):
                         yield (r, c, nr, nc)
 
             elif pt == "xiang":
@@ -409,7 +415,7 @@ class Rules:
                     if b[ir][ic]:
                         continue
                     dest = b[nr][nc]
-                    if dest is None or dest.color != player:
+                    if Rules._pseudo_capture_ok(dest, player):
                         yield (r, c, nr, nc)
 
             elif pt == "shi":
@@ -423,7 +429,7 @@ class Rules:
                     elif not (0 <= nr <= 2 and 3 <= nc <= 5):
                         continue
                     dest = b[nr][nc]
-                    if dest is None or dest.color != player:
+                    if Rules._pseudo_capture_ok(dest, player):
                         yield (r, c, nr, nc)
 
             elif pt == "jiang":
@@ -437,7 +443,7 @@ class Rules:
                     elif not (0 <= nr <= 2 and 3 <= nc <= 5):
                         continue
                     dest = b[nr][nc]
-                    if dest is None or dest.color != player:
+                    if Rules._pseudo_capture_ok(dest, player):
                         yield (r, c, nr, nc)
 
             elif pt == "bing":
@@ -455,7 +461,7 @@ class Rules:
                     if not (0 <= nr < 10 and 0 <= nc < 9):
                         continue
                     dest = b[nr][nc]
-                    if dest is None or dest.color != player:
+                    if Rules._pseudo_capture_ok(dest, player):
                         yield (r, c, nr, nc)
 
     @staticmethod
