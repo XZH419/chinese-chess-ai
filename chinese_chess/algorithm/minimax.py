@@ -252,6 +252,12 @@ class MinimaxAI:
         gh_len = len(game_history) if game_history else 0
         midgame_no_random = gh_len > 20
 
+        # Aspiration Windows：期望窗口宽度（约一兵 / 半马量级）
+        window_size = 100.0
+        alpha_full = float("-inf")
+        beta_full = float("inf")
+        previous_score: Optional[float] = None
+
         try:
             for current_depth in range(1, self.depth + 1):
                 if len(self.history_table) > _HISTORY_AGING_THRESHOLD:
@@ -262,61 +268,92 @@ class MinimaxAI:
                 moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
                 self.order_moves(board, moves, current_depth)
 
-                alpha = float("-inf")
-                beta = float("inf")
-                scored_moves: List[Tuple[float, Tuple[int, int, int, int]]] = []
-                best_score_so_far = float("-inf")
-                any_legal = False
+                if current_depth >= 3 and previous_score is not None:
+                    asp_alpha = previous_score - window_size
+                    asp_beta = previous_score + window_size
+                else:
+                    asp_alpha = alpha_full
+                    asp_beta = beta_full
 
-                for move in moves:
-                    if time_limit is not None and (time.time() - self.start_time) > time_limit:
-                        raise SearchTimeoutException()
+                # 期望窗口：Fail-Low/High 只针对本层全局最优 best_score_this_depth，整层重搜
+                while True:
+                    alpha = asp_alpha
+                    beta = asp_beta
+                    best_score_this_depth = float("-inf")
+                    best_move_this_depth: Optional[Tuple[int, int, int, int]] = None
+                    scored_moves = []
+                    best_score_so_far = float("-inf")
+                    any_legal = False
 
-                    mover = board.current_player
-                    captured = board.apply_move(*move)
-                    self.history_hashes.append(board.zobrist_hash)
+                    for move in moves:
+                        if time_limit is not None and (time.time() - self.start_time) > time_limit:
+                            raise SearchTimeoutException()
 
-                    # 延迟合法性校验（防送将/白脸将）
-                    if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
-                        self.history_hashes.pop()
-                        board.undo_move(*move, captured)
+                        mover = board.current_player
+                        captured = board.apply_move(*move)
+                        self.history_hashes.append(board.zobrist_hash)
+
+                        # 延迟合法性校验（防送将/白脸将）
+                        if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
+                            self.history_hashes.pop()
+                            board.undo_move(*move, captured)
+                            continue
+
+                        any_legal = True
+                        # 搜索下界快照：与容差/记录用的「业务 alpha」解耦，避免与 PVS 根窗口互相污染
+                        search_alpha = alpha
+                        try:
+                            score = -self._alphabeta(
+                                board,
+                                current_depth - 1,
+                                -beta,
+                                -search_alpha,
+                                self.start_time,
+                                time_limit,
+                                check_ext_left=_MAX_CHECK_EXTENSIONS,
+                            )
+                        finally:
+                            self.history_hashes.pop()
+                            board.undo_move(*move, captured)
+
+                        if score > best_score_this_depth:
+                            best_score_this_depth = score
+                            best_move_this_depth = move
+
+                        # Fail-Low / 窗口剪枝返回的界值：若已不优于本步搜索下界，不可信为实分，禁止进随机池
+                        actual_record_score = score
+                        if score <= search_alpha:
+                            actual_record_score = float("-inf")
+
+                        scored_moves.append((actual_record_score, move))
+
+                        if actual_record_score > best_score_so_far:
+                            best_score_so_far = actual_record_score
+
+                        if midgame_no_random:
+                            current_tol = 0
+                        elif best_score_so_far > float("-inf") and abs(best_score_so_far) >= 300:
+                            current_tol = 0
+                        else:
+                            current_tol = self.tolerance
+
+                        new_alpha = best_score_so_far - current_tol
+                        if new_alpha > alpha:
+                            alpha = new_alpha
+
+                        if score > alpha:
+                            alpha = score
+
+                    if not any_legal:
+                        break
+
+                    if best_score_this_depth <= asp_alpha:
+                        asp_alpha = float("-inf")
                         continue
-
-                    any_legal = True
-                    try:
-                        score = -self._alphabeta(
-                            board,
-                            current_depth - 1,
-                            -beta,
-                            -alpha,
-                            self.start_time,
-                            time_limit,
-                            check_ext_left=_MAX_CHECK_EXTENSIONS,
-                        )
-                    finally:
-                        self.history_hashes.pop()
-                        board.undo_move(*move, captured)
-
-                    # Fail-Low / 窗口剪枝返回的界值：若已不优于当前 alpha，不可信为实分，禁止进随机池
-                    actual_record_score = score
-                    if score <= alpha:
-                        actual_record_score = float("-inf")
-
-                    scored_moves.append((actual_record_score, move))
-
-                    if actual_record_score > best_score_so_far:
-                        best_score_so_far = actual_record_score
-
-                    if midgame_no_random:
-                        current_tol = 0
-                    elif best_score_so_far > float("-inf") and abs(best_score_so_far) >= 300:
-                        current_tol = 0
-                    else:
-                        current_tol = self.tolerance
-
-                    new_alpha = best_score_so_far - current_tol
-                    if new_alpha > alpha:
-                        alpha = new_alpha
+                    if best_score_this_depth >= asp_beta:
+                        asp_beta = float("inf")
+                        continue
+                    break
 
                 if not any_legal:
                     break  # 根节点无路可走：被将死/困毙
@@ -354,6 +391,7 @@ class MinimaxAI:
                 self._tt_store_exact(
                     board.zobrist_hash, current_depth, float(root_tt_score), current_best_move
                 )
+                previous_score = float(best_score_this_depth)
         except SearchTimeoutException:
             pass
 
