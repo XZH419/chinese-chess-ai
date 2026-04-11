@@ -324,13 +324,10 @@ class Rules:
     def get_pseudo_legal_moves(board: Board, player: str) -> Iterator[Tuple[int, int, int, int]]:
         """伪合法走法生成（仅几何与吃子颜色），供 AI 搜索批量过滤。
 
-        不调用 ``get_piece`` / ``_inside_board`` / ``is_valid_move``；不校验自将、白脸将。
+        不调用 ``get_piece`` / ``is_valid_move``；目标格用 ``b[nr][nc]`` 与 ``color`` 直判；不校验自将、白脸将。
         产出 ``(r, c, nr, nc)``，与 ``get_all_moves`` 元组格式一致。
         """
         b = board.board
-
-        def dest_ok(cell) -> bool:
-            return cell is None or cell.color != player
 
         for r, c in board.active_pieces[player]:
             p = b[r][c]
@@ -394,7 +391,7 @@ class Rules:
                     if not (0 <= nr < 10 and 0 <= nc < 9):
                         continue
                     dest = b[nr][nc]
-                    if dest_ok(dest):
+                    if dest is None or dest.color != player:
                         yield (r, c, nr, nc)
 
             elif pt == "xiang":
@@ -412,7 +409,7 @@ class Rules:
                     if b[ir][ic]:
                         continue
                     dest = b[nr][nc]
-                    if dest_ok(dest):
+                    if dest is None or dest.color != player:
                         yield (r, c, nr, nc)
 
             elif pt == "shi":
@@ -426,7 +423,7 @@ class Rules:
                     elif not (0 <= nr <= 2 and 3 <= nc <= 5):
                         continue
                     dest = b[nr][nc]
-                    if dest_ok(dest):
+                    if dest is None or dest.color != player:
                         yield (r, c, nr, nc)
 
             elif pt == "jiang":
@@ -440,7 +437,7 @@ class Rules:
                     elif not (0 <= nr <= 2 and 3 <= nc <= 5):
                         continue
                     dest = b[nr][nc]
-                    if dest_ok(dest):
+                    if dest is None or dest.color != player:
                         yield (r, c, nr, nc)
 
             elif pt == "bing":
@@ -458,7 +455,7 @@ class Rules:
                     if not (0 <= nr < 10 and 0 <= nc < 9):
                         continue
                     dest = b[nr][nc]
-                    if dest_ok(dest):
+                    if dest is None or dest.color != player:
                         yield (r, c, nr, nc)
 
     @staticmethod
