@@ -519,5 +519,7 @@ class Evaluation:
             res = red_score - black_score + check_bonus
         else:
             res = black_score - red_score + check_bonus
+        if len(Evaluation._eval_cache) > 200_000:
+            Evaluation._eval_cache.clear()
         Evaluation._eval_cache[h] = res
         return res

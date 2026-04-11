@@ -81,8 +81,6 @@ class MinimaxAI:
         self.history_hashes: List[int] = []
         # 历史启发：beta 剪枝着法加权，跨着法积累（与 TT 不同，不在每步根搜索清空）
         self.history_table: Dict[Tuple[int, int, int, int], int] = {}
-        # 静态评估置换表：zobrist_hash -> 分数（在 get_best_move 中按需清空防膨胀）
-        self.eval_table: Dict[int, float] = {}
 
     def reset_benchmark_stats(self) -> None:
         """清零基准统计（每局对弈开始前调用）。"""
@@ -133,6 +131,8 @@ class MinimaxAI:
         """叶节点/评估值与搜索窗口无关，固定为 EXACT。"""
         self._tt_write_entry(key, depth, score, _TT_EXACT, best_move)
 
+    _TT_MAX_SIZE = 200_000
+
     def _tt_write_entry(
         self,
         key: int,
@@ -141,6 +141,8 @@ class MinimaxAI:
         flag: int,
         best_move: Optional[Tuple[int, int, int, int]],
     ) -> None:
+        if len(self.transposition_table) > self._TT_MAX_SIZE:
+            self.transposition_table.clear()
         self.transposition_table[key] = (depth, score, flag, best_move)
 
     @staticmethod
@@ -280,8 +282,6 @@ class MinimaxAI:
         # 每步根搜索清空 TT：跨回合复用同键曾导致子树全命中、nodes=0 与着法异常
         self.transposition_table.clear()
         self._reset_killers()
-        if len(self.eval_table) > 100_000:
-            self.eval_table.clear()
 
         # 外部可传入从开局到当前局面的完整哈希链；若末尾已是当前局面则不再重复追加
         self.history_hashes = list(move_history)
@@ -445,13 +445,15 @@ class MinimaxAI:
             print(f"评估的节点总数: {self._nodes} (置换表命中: {self._tt_hits})")
         return global_best_move
 
-    def _get_cached_eval(self, board) -> float:
-        key = board.zobrist_hash
-        if key in self.eval_table:
-            return self.eval_table[key]
-        score = Evaluation.evaluate(board)
-        self.eval_table[key] = score
-        return score
+    def _is_repeated(self, board, *, skip_rep_count: bool = False) -> Optional[float]:
+        """局面重复检测：路径内重复或全局三次重复均返回对应分数，否则 ``None``。"""
+        if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
+            return Evaluation.repetition_leaf_score(board)
+        if not skip_rep_count and board.get_repetition_count() >= 3:
+            if Rules.is_king_in_check(board, board.current_player):
+                return 100000.0
+            return 10.0
+        return None
 
     def _quiescence_search(
         self,
@@ -467,25 +469,23 @@ class MinimaxAI:
         吃子列表经 ``order_moves`` 排序（MVV-LVA + 历史/TT），优先高分枝剪枝。
         返回值与 `_alphabeta` 一致：当前行棋方视角，分越高越好。
         """
-        if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
-            return Evaluation.repetition_leaf_score(board)
-
-        if not skip_rep_count:
-            player = board.current_player
-            if board.get_repetition_count() >= 3:
-                if Rules.is_king_in_check(board, player):
-                    return 100000.0
-                return 10.0
+        rep = self._is_repeated(board, skip_rep_count=skip_rep_count)
+        if rep is not None:
+            return rep
 
         if depth_limit <= 0:
             self._nodes += 1
-            return self._get_cached_eval(board)
+            return Evaluation.evaluate(board)
 
         self._nodes += 1
-        alpha_bound = alpha
-        stand_pat = self._get_cached_eval(board)
+        stand_pat = Evaluation.evaluate(board)
         if stand_pat >= beta:
             return beta
+
+        DELTA_MARGIN = 1100
+        if stand_pat + DELTA_MARGIN <= alpha:
+            return alpha
+
         if stand_pat > alpha:
             alpha = stand_pat
 
@@ -495,10 +495,6 @@ class MinimaxAI:
             return alpha
 
         self.order_moves(board, captures, depth_limit)
-
-        DELTA_MARGIN = 900 + 200
-        if stand_pat + DELTA_MARGIN < alpha_bound:
-            return alpha_bound
 
         for move in captures:
             mover = board.current_player
@@ -543,15 +539,9 @@ class MinimaxAI:
         ``check_ext_left``：若子局面轮到走棋方被将军，可令递归深度不减 1（最多延伸
         ``_MAX_CHECK_EXTENSIONS`` 次/路径），减轻将线剪枝过浅。
         """
-        if not skip_rep_count:
-            player = board.current_player
-            if board.get_repetition_count() >= 3:
-                if Rules.is_king_in_check(board, player):
-                    return 100000.0
-                return 10.0
-
-        if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
-            return Evaluation.repetition_leaf_score(board)
+        rep = self._is_repeated(board, skip_rep_count=skip_rep_count)
+        if rep is not None:
+            return rep
         if time_limit is not None and (time.time() - start_time) > time_limit:
             raise SearchTimeoutException()
 
