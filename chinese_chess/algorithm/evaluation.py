@@ -218,6 +218,9 @@ class Evaluation:
     )
     _ORTH = ((0, 1), (0, -1), (1, 0), (-1, 0))
 
+    # 轮到走子方对对方老将形成将军时的评估偏置（依赖 ``Rules.is_king_in_check`` 正确）
+    CHECK_EVAL_BONUS: float = 15.0
+
     # 战术分（同时加在 MG/EG 轨道，与旧 palace_pressure 量级可比）
     _T_ROOK_FILE = 32.0
     _T_PAO_SCREEN = 26.0
@@ -509,7 +512,9 @@ class Evaluation:
             black_score -= pen
 
         opp = "black" if board.current_player == "red" else "red"
-        check_bonus = 15.0 if Rules.is_king_in_check(board, opp) else 0.0
+        check_bonus = (
+            Evaluation.CHECK_EVAL_BONUS if Rules.is_king_in_check(board, opp) else 0.0
+        )
         if board.current_player == "red":
             res = red_score - black_score + check_bonus
         else:

@@ -23,15 +23,34 @@ _MSG_MA_BLOCKED = "蹩马腿"
 _MSG_XIANG_EYE = "塞象眼"
 _MSG_PAO_BAD = "炮无炮架或非法翻山"
 _MSG_BAD_GEOMETRY = "棋子走法不合规"
-_MSG_NO_CAPTURE_KING = "不得吃掉对方老将"
+_MSG_NO_CAPTURE_KING = "老将不可被捕获，请通过走法形成将死"
 _MSG_KINGS_FACE = "王不见王"
-_MSG_IN_CHECK_STILL = "正在被将军，请先解将"
+_MSG_IN_CHECK_STILL = "正在被将军，必须移动老将或吃掉将军棋子"
 _MSG_SELF_CHECK = "由于飞将或未解将，行动后将处于被将军状态"
 _MSG_LONG_CHECK = "长将违规，必须变招"
 
 
 class Rules:
     """All rules as static methods to avoid stateful coupling."""
+
+    # 马从 (sr,sc) 跃至 (er,ec) 时马腿格（与 ``_geometry_error`` / 伪合法生成一致）
+    _MA_ATTACK_DELTAS: Tuple[Tuple[int, int], ...] = (
+        (2, 1),
+        (2, -1),
+        (-2, 1),
+        (-2, -1),
+        (1, 2),
+        (1, -2),
+        (-1, 2),
+        (-1, -2),
+    )
+
+    @staticmethod
+    def _ma_leg_square(sr: int, sc: int, er: int, ec: int) -> Tuple[int, int]:
+        """马腿坐标：沿「走两格」的那条线取中点（行列不可反）。"""
+        if abs(sr - er) == 2:
+            return (sr + er) // 2, sc
+        return sr, (sc + ec) // 2
 
     @staticmethod
     def _mover_for_move_index(move_index: int) -> str:
@@ -190,10 +209,7 @@ class Rules:
             dc = abs(sc - ec)
             if not ((dr == 2 and dc == 1) or (dr == 1 and dc == 2)):
                 return _MSG_BAD_GEOMETRY
-            if dr == 2:
-                leg_r, leg_c = (sr + er) // 2, sc
-            else:
-                leg_r, leg_c = sr, (sc + ec) // 2
+            leg_r, leg_c = Rules._ma_leg_square(sr, sc, er, ec)
             if b[leg_r][leg_c]:
                 return _MSG_MA_BLOCKED
             return None
@@ -438,21 +454,9 @@ class Rules:
                         nc += dc
 
             elif pt == "ma":
-                for dr, dc in (
-                    (2, 1),
-                    (2, -1),
-                    (-2, 1),
-                    (-2, -1),
-                    (1, 2),
-                    (1, -2),
-                    (-1, 2),
-                    (-1, -2),
-                ):
+                for dr, dc in Rules._MA_ATTACK_DELTAS:
                     nr, nc = r + dr, c + dc
-                    if abs(dr) == 2:
-                        lr, lc = r + dr // 2, c
-                    else:
-                        lr, lc = r, c + dc // 2
+                    lr, lc = Rules._ma_leg_square(r, c, nr, nc)
                     if not (0 <= lr < 10 and 0 <= lc < 9):
                         continue
                     if b[lr][lc] is not None:
@@ -534,6 +538,7 @@ class Rules:
         state_hashes: Optional[List[int]] = None,
         ply_gave_check: Optional[List[bool]] = None,
     ):
+        """合法走法；被将军时仅返回能解除己方老将受攻的着法（经 ``is_valid_move`` 过滤）。"""
         return Rules.get_all_moves(
             board,
             player,
@@ -572,27 +577,19 @@ class Rules:
                 r += dr
                 c += dc
 
-        for dr, dc, leg_dr, leg_dc in (
-            (-2, -1, -1, 0),
-            (-2, 1, -1, 0),
-            (2, -1, 1, 0),
-            (2, 1, 1, 0),
-            (-1, -2, 0, -1),
-            (1, -2, 0, -1),
-            (-1, 2, 0, 1),
-            (1, 2, 0, 1),
-        ):
-            hr, hc = kr + dr, kc + dc
+        for ddr, ddc in Rules._MA_ATTACK_DELTAS:
+            hr, hc = kr + ddr, kc + ddc
             if not (0 <= hr < 10 and 0 <= hc < 9):
                 continue
-            lr, lc = kr + leg_dr, kc + leg_dc
-            if not (0 <= lr < 10 and 0 <= lc < 9):
-                continue
-            if b[lr][lc] is not None:
-                continue
             hp = b[hr][hc]
-            if hp is not None and hp.color == opponent and hp.piece_type == "ma":
-                return True
+            if hp is None or hp.color != opponent or hp.piece_type != "ma":
+                continue
+            leg_r, leg_c = Rules._ma_leg_square(hr, hc, kr, kc)
+            if not (0 <= leg_r < 10 and 0 <= leg_c < 9):
+                continue
+            if b[leg_r][leg_c] is not None:
+                continue
+            return True
 
         if player == "red":
             for pr, pc in ((kr - 1, kc), (kr, kc - 1), (kr, kc + 1)):
