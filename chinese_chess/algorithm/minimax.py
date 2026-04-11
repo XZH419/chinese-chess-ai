@@ -535,6 +535,7 @@ class MinimaxAI:
         best = float("-inf")
         best_move = None
         any_legal = False
+        is_first_move = True
 
         for move in moves:
             if time_limit is not None and (time.time() - start_time) > time_limit:
@@ -557,20 +558,53 @@ class MinimaxAI:
                 next_check_ext = check_ext_left - 1
 
             try:
-                score = -self._alphabeta(
-                    board,
-                    next_depth,
-                    -beta,
-                    -alpha,
-                    start_time,
-                    time_limit,
-                    allow_null=allow_null,
-                    use_tt=use_tt,
-                    check_ext_left=next_check_ext,
-                )
+                # PVS：首步（排序后最可能 PV）全窗口；后续先零窗口，fail-high 再全窗口。
+                # alpha 为 -inf 时零窗口 (-alpha-1, -alpha) 退化无效，强制全窗口。
+                use_full_window = is_first_move or alpha == float("-inf")
+                if use_full_window:
+                    score = -self._alphabeta(
+                        board,
+                        next_depth,
+                        -beta,
+                        -alpha,
+                        start_time,
+                        time_limit,
+                        allow_null=allow_null,
+                        use_tt=use_tt,
+                        check_ext_left=next_check_ext,
+                        skip_rep_count=skip_rep_count,
+                    )
+                else:
+                    score = -self._alphabeta(
+                        board,
+                        next_depth,
+                        -alpha - 1,
+                        -alpha,
+                        start_time,
+                        time_limit,
+                        allow_null=allow_null,
+                        use_tt=use_tt,
+                        check_ext_left=next_check_ext,
+                        skip_rep_count=skip_rep_count,
+                    )
+                    if alpha < score < beta:
+                        score = -self._alphabeta(
+                            board,
+                            next_depth,
+                            -beta,
+                            -alpha,
+                            start_time,
+                            time_limit,
+                            allow_null=allow_null,
+                            use_tt=use_tt,
+                            check_ext_left=next_check_ext,
+                            skip_rep_count=skip_rep_count,
+                        )
             finally:
                 self.history_hashes.pop()
                 board.undo_move(*move, captured)
+
+            is_first_move = False
 
             if score > best:
                 best = score
