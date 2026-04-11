@@ -1,7 +1,7 @@
-"""Minimax AI with alpha-beta pruning.
+"""Minimax AI 搜索引擎（Negamax + Alpha-Beta 剪枝）。
 
-Physical migration from `chinese-chess/ai/ai_minimax.py` with only import-path
-and API updates (Board.make_move -> Board.apply_move, Board.*rules -> Rules.*).
+集成技术：迭代加深、PVS、期望窗口、置换表、Null Move Pruning、
+杀手走法、历史启发、将军延伸、静止搜索（QS + Delta Pruning）。
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ import random
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from chinese_chess.model import zobrist
 from chinese_chess.model.rules import Rules
 
 from .evaluation import Evaluation
@@ -89,6 +88,17 @@ class MinimaxAI:
         self._bench_search_count = 0
 
     def _tt_probe(self, key: int, depth: int, alpha: float, beta: float) -> Optional[float]:
+        """查询置换表中已有的搜索结果。
+
+        Args:
+            key: 局面 Zobrist 哈希。
+            depth: 当前剩余搜索深度（仅深度 >= 存储深度的条目才可信）。
+            alpha: 当前搜索窗口下界。
+            beta: 当前搜索窗口上界。
+
+        Returns:
+            命中且满足窗口条件时返回缓存分数，否则 ``None``。
+        """
         entry = self.transposition_table.get(key)
         if entry is None:
             return None
@@ -112,7 +122,7 @@ class MinimaxAI:
         beta_orig: float,
         best_move: Optional[Tuple[int, int, int, int]],
     ) -> None:
-        # 避免 alpha=-inf / beta=+inf 时误分类（虽多数情况下有限分数不会踩坑）
+        """根据搜索结果与原始窗口的关系自动推断标志位（EXACT / LOWER / UPPER）并写入 TT。"""
         if score <= alpha_orig and alpha_orig != float("-inf"):
             flag = _TT_UPPER
         elif score >= beta_orig and beta_orig != float("inf"):
@@ -188,9 +198,15 @@ class MinimaxAI:
     def order_moves(
         self, board, moves: List[Tuple[int, int, int, int]], depth: int
     ) -> None:
-        """排序键（高优先）：TT 着法 > 历史启发 > MVV-LVA 吃子 > 杀手 > 其余。
+        """就地排序走法列表，提升 Alpha-Beta 剪枝效率。
 
-        历史分量 capped，保证恒低于 ``_TT_MOVE_SORT_SCORE``。
+        排序优先级（降序）：TT 最佳着法 > MVV-LVA 吃子 + 历史启发 > 杀手走法 > 其余。
+        历史分量上限为 ``_HISTORY_SORT_CAP``，保证恒低于 ``_TT_MOVE_SORT_SCORE``。
+
+        Args:
+            board: 当前棋盘（用于读取目标格棋子以计算 MVV-LVA 分）。
+            moves: 待排序的走法列表（原地修改）。
+            depth: 当前剩余搜索深度（用于索引杀手表）。
         """
         pv = Evaluation.PIECE_VALUES
         ki = self._killer_index(depth)
@@ -466,8 +482,19 @@ class MinimaxAI:
     ) -> float:
         """静止搜索（Quiescence Search, QS）：仅扩展吃子走法，缓解水平线效应。
 
-        吃子列表经 ``order_moves`` 排序（MVV-LVA + 历史/TT），优先高分枝剪枝。
-        返回值与 `_alphabeta` 一致：当前行棋方视角，分越高越好。
+        在主搜索到达叶节点（depth=0）后继续搜索吃子序列，直到局面"安静"为止。
+        吃子列表经 MVV-LVA + 历史/TT 排序，优先高价值捕获以加速剪枝。
+        内含 Delta Pruning：若 stand_pat + 最大捕获增益仍无法超越 alpha，直接返回。
+
+        Args:
+            board: 当前棋盘。
+            alpha: 搜索窗口下界。
+            beta: 搜索窗口上界。
+            depth_limit: QS 递归深度上限（防止无限吃子链）。
+            skip_rep_count: 跳过全局重复计数（空步剪枝子树使用）。
+
+        Returns:
+            当前行棋方视角的评估分数（分越高越好）。
         """
         rep = self._is_repeated(board, skip_rep_count=skip_rep_count)
         if rep is not None:
@@ -534,10 +561,32 @@ class MinimaxAI:
         check_ext_left: int = _MAX_CHECK_EXTENSIONS,
         skip_rep_count: bool = False,
     ) -> float:
-        """Negamax Alpha-Beta（当前行棋方视角，分越高越好）。
+        """Negamax Alpha-Beta 搜索（当前行棋方视角，分越高越好）。
 
-        ``check_ext_left``：若子局面轮到走棋方被将军，可令递归深度不减 1（最多延伸
-        ``_MAX_CHECK_EXTENSIONS`` 次/路径），减轻将线剪枝过浅。
+        集成以下优化技术：
+        - **置换表（TT）**：命中时直接返回缓存分数。
+        - **Null Move Pruning**：深水区跳过己方一手，若仍 fail-high 则剪枝。
+        - **PVS（Principal Variation Search）**：首步全窗口，后续零窗口探测 + fail-high 重搜。
+        - **将军延伸**：被将军时 depth 不减，延伸上限由 ``check_ext_left`` 控制。
+        - **杀手走法 / 历史启发**：剪枝着法记录，加速后续同层排序。
+
+        Args:
+            board: 当前棋盘。
+            depth: 剩余搜索深度（0 时转入 QS）。
+            alpha: 搜索窗口下界。
+            beta: 搜索窗口上界。
+            start_time: 搜索启动时间戳（用于超时检测）。
+            time_limit: 超时秒数（``None`` 不限时）。
+            allow_null: 是否允许空步剪枝（递归关闭防连续空步）。
+            use_tt: 是否使用置换表读写。
+            check_ext_left: 本路径上剩余将军延伸次数。
+            skip_rep_count: 跳过全局重复计数（空步子树使用）。
+
+        Returns:
+            当前行棋方视角的评估分数。
+
+        Raises:
+            SearchTimeoutException: 搜索超时时抛出，由迭代加深框架捕获。
         """
         rep = self._is_repeated(board, skip_rep_count=skip_rep_count)
         if rep is not None:
@@ -562,13 +611,8 @@ class MinimaxAI:
             and self.has_enough_material(board, player)
         ):
             R = 2
-            reduced_depth = depth - 1 - R
-            if reduced_depth < 0:
-                reduced_depth = 0
-            saved_player = board.current_player
-            saved_hash = board.zobrist_hash
-            board.current_player = "black" if saved_player == "red" else "red"
-            board.zobrist_hash = saved_hash ^ zobrist.BLACK_TO_MOVE
+            reduced_depth = max(depth - 1 - R, 0)
+            board.toggle_player()
             try:
                 null_score = -self._alphabeta(
                     board,
@@ -583,8 +627,7 @@ class MinimaxAI:
                     skip_rep_count=True,
                 )
             finally:
-                board.current_player = saved_player
-                board.zobrist_hash = saved_hash
+                board.toggle_player()
             if null_score >= beta:
                 return beta
 

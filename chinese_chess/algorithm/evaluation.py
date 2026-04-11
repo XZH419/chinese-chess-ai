@@ -55,7 +55,6 @@ class Evaluation:
 
     # 可参与将杀/实质性进攻的子力（仅剩将、士、象视为无法将死 → 评估为和）
     ATTACKING_PIECE_TYPES = frozenset({"che", "ma", "pao", "bing"})
-    MAJOR_TYPES = frozenset({"che", "ma", "pao"})
 
     # 游戏阶段权重（车=2, 马=1, 炮=1）。满子 phase 和为 16。
     PHASE_WEIGHTS: dict[str, int] = {"che": 2, "ma": 1, "pao": 1}
@@ -80,7 +79,7 @@ class Evaluation:
         "bing": 140,
         "jiang": 0,
     }
-    # 兼容旧代码路径（如 ``_raw_material``）：等价于中局子力表
+    # 子力价值表（等价于中局子力表，供走法排序等外部引用）
     PIECE_VALUES: dict[str, int] = MG_VALUES
 
     # 开局子力总和约量级，用于兑子惩罚归一
@@ -241,24 +240,6 @@ class Evaluation:
         return 0.0
 
     @staticmethod
-    def _raw_material(board: Board) -> tuple[float, float, float, int]:
-        b = board.board
-        red_m = black_m = 0.0
-        n = 0
-        for color_key in ("red", "black"):
-            for r, c in board.active_pieces.get(color_key, ()):
-                p = b[r][c]
-                if p is None or p.color != color_key:
-                    continue
-                v = float(Evaluation.MG_VALUES.get(p.piece_type, 0))
-                n += 1
-                if color_key == "red":
-                    red_m += v
-                else:
-                    black_m += v
-        return red_m, black_m, red_m + black_m, n
-
-    @staticmethod
     def _ma_mobility(board: Board, sr: int, sc: int, color: str) -> float:
         """马腿判定 + 机动分；落点为己方马时计连环马协同 +15。"""
         b = board.board
@@ -336,7 +317,24 @@ class Evaluation:
         enemy_kr: Optional[int],
         enemy_kc: Optional[int],
     ) -> float:
-        """轻量战术分：纵线车/炮、高位马马腿、车马协同。不着法生成。"""
+        """轻量战术协同分（无着法生成，纯坐标运算）。
+
+        检测以下战术模式并累加奖励：
+        - 车与敌方将同列且无遮挡（纵线车威胁）。
+        - 炮与敌方将同列且恰有一枚炮架（炮架已成）。
+        - 马位于挂角/卧槽高价值格且至少一条马腿畅通。
+        - 马深入敌阵且己方车也在敌方底线/侧翼（车马协同）。
+
+        Args:
+            board: 当前棋盘。
+            player: 计算己方（"red" 或 "black"）。
+            b: ``board.board`` 的局部引用（避免重复属性查找）。
+            enemy_kr: 敌方将的行坐标（被吃时为 ``None``）。
+            enemy_kc: 敌方将的列坐标。
+
+        Returns:
+            己方战术协同总分（非负浮点数）。
+        """
         if enemy_kr is None or enemy_kc is None:
             return 0.0
         ekr, ekc = enemy_kr, enemy_kc

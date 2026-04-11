@@ -69,10 +69,18 @@ class Rules:
         history: List[MoveEntry],
         board_after_move: Board,
     ) -> Optional[str]:
-        """若本步将导致第三次相同局面且循环内该方着法均为将军，返回 ``_MSG_LONG_CHECK``。
+        """检测「长将」违规：若本步将导致第三次相同局面且循环节内该方每手均为将军，判定违规。
 
-        ``history`` 为截止到走子前的完整历史（含初始局面占位项）；
-        本函数自行计算走子后的哈希与将军状态，无需调用者预先存入。
+        本函数直接读取 ``MoveEntry.mover`` 字段判定行棋方，不依赖奇偶索引假设，
+        因此支持任意一方先走的非标准局面。
+
+        Args:
+            mover: 当前行棋方（"red" 或 "black"）。
+            history: 截止到走子前的完整对局历史（含初始局面占位项 ``history[0]``）。
+            board_after_move: 模拟执行本步后的棋盘状态（用于读取哈希与将军判定）。
+
+        Returns:
+            违规时返回 ``_MSG_LONG_CHECK`` 字符串，否则 ``None``。
         """
         h_new = board_after_move.zobrist_hash
         n_prior = sum(1 for e in history if e.pos_hash == h_new)
@@ -320,26 +328,31 @@ class Rules:
         validate_self_check=True,
         history: Optional[List[MoveEntry]] = None,
     ):
-        """生成指定方的所有走法；``validate_self_check=True`` 时过滤自将/长将。"""
-        moves = []
+        """生成指定方的所有走法；``validate_self_check=True`` 时过滤自将/长将。
+
+        返回列表已去重（``active_pieces`` 脏数据等极端情况下可能产生重复条目）。
+        """
+        seen: set[Tuple[int, int, int, int]] = set()
+        moves: list[Tuple[int, int, int, int]] = []
         for r, c in board.active_pieces[player]:
             piece = board.board[r][c]
             if not piece or piece.color != player:
                 continue
             candidates = Rules._candidate_targets(board, r, c, piece.piece_type, player)
             for er, ec in candidates:
+                m = (r, c, er, ec)
+                if m in seen:
+                    continue
                 ok, _ = Rules.is_valid_move(
                     board,
-                    r,
-                    c,
-                    er,
-                    ec,
+                    r, c, er, ec,
                     player=player,
                     check_legality=validate_self_check,
                     history=history,
                 )
                 if ok:
-                    moves.append((r, c, er, ec))
+                    seen.add(m)
+                    moves.append(m)
         return moves
 
     @staticmethod

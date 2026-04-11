@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .types import Color, PieceType
-
 
 @dataclass(slots=True)
 class Piece:

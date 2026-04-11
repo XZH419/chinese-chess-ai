@@ -112,8 +112,10 @@ class Board:
         if 0 <= row < self.rows and 0 <= col < self.cols:
             self.board[row][col] = piece
 
-    def _inside_board(self, row, col):
-        return 0 <= row < self.rows and 0 <= col < self.cols
+    def toggle_player(self) -> None:
+        """切换行棋方并同步更新 Zobrist 哈希（空步剪枝专用）。"""
+        self.current_player = "black" if self.current_player == "red" else "red"
+        self.zobrist_hash ^= zobrist.BLACK_TO_MOVE
 
     def apply_move(self, start_row, start_col, end_row, end_col):
         """Execute a move without legality checking.
