@@ -238,6 +238,7 @@ class MinimaxAI:
 
         ``time_limit`` 仅为接口兼容保留，本实现中不在根迭代加深路径上启用。
         """
+        Evaluation._eval_cache.clear()
         gh_book = game_history if game_history is not None else []
         if len(gh_book) < 30:
             zkey = board.zobrist_hash

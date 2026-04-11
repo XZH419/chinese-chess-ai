@@ -1,10 +1,8 @@
 """启发式评估函数（Evaluator）。
 
-目标：
-- 子力价值：车900，炮450，马400，兵100，士/相200
-- 位置分：Piece-Square Tables（PST）
-- 兑子惩罚、炮架/马腿机动、九宫压力、残局兵价值、将军奖励
-- 返回：当前行棋方视角；双方均无车/马/炮/兵时视为物质和棋，直接 0 分
+- **Tapered Evaluation**：MG/EG 双轨 + 阶段 ``phase`` 线性插值。
+- 子力：``MG_VALUES`` / ``EG_VALUES``；位置：``PST_MG_MAP`` / ``PST_EG_MAP``。
+- 兑子惩罚、马/炮附加、九宫压力、过河兵纵深、兵种相克、将军奖励。
 """
 
 from __future__ import annotations
@@ -22,36 +20,64 @@ RED_PALACE_SQUARES: frozenset[tuple[int, int]] = frozenset(
 
 
 class Evaluation:
+    # 静态评估置换表：``zobrist_hash`` → 分数（``MinimaxAI.get_best_move`` 根入口会清空）
+    _eval_cache: dict[int, float] = {}
+
     # 可参与将杀/实质性进攻的子力（仅剩将、士、象视为无法将死 → 评估为和）
     ATTACKING_PIECE_TYPES = frozenset({"che", "ma", "pao", "bing"})
     MAJOR_TYPES = frozenset({"che", "ma", "pao"})
 
-    # 基础子力价值（单位分）
-    PIECE_VALUES = {
+    # 游戏阶段权重（车=2, 马=1, 炮=1）。满子 phase 和为 16。
+    PHASE_WEIGHTS: dict[str, int] = {"che": 2, "ma": 1, "pao": 1}
+    TOTAL_PHASE: float = 16.0
+
+    # 中局 / 残局子力价值（与 taper 插值配套）
+    MG_VALUES: dict[str, int] = {
         "che": 900,
-        "pao": 450,
+        "pao": 470,
         "ma": 400,
         "xiang": 200,
         "shi": 200,
-        "bing": 100,
+        "bing": 90,
         "jiang": 0,
     }
+    EG_VALUES: dict[str, int] = {
+        "che": 920,
+        "pao": 410,
+        "ma": 430,
+        "xiang": 200,
+        "shi": 200,
+        "bing": 140,
+        "jiang": 0,
+    }
+    # 兼容旧代码路径（如 ``_raw_material``）：等价于中局子力表
+    PIECE_VALUES: dict[str, int] = MG_VALUES
 
     # 开局子力总和约量级，用于兑子惩罚归一
     _REF_TOTAL_MATERIAL = 4400
     # 领先方（|diff|>50）在子力减少时受到的兑子惩罚系数
     _ANTI_TRADE_COEFF = 0.018
-    # 残局：子力总和低于此或棋子数少时强化过河兵
-    _ENDGAME_MATERIAL = 2800
-    _ENDGAME_PIECE_COUNT = 15
 
-    PST_BING = [
+    PST_BING_MG = [
         [14, 14, 16, 18, 20, 18, 16, 14, 14],
         [16, 16, 18, 22, 24, 22, 18, 16, 16],
         [12, 12, 16, 20, 22, 20, 16, 12, 12],
         [8, 8, 12, 16, 18, 16, 12, 8, 8],
         [4, 4, 8, 10, 12, 10, 8, 4, 4],
         [2, 2, 4, 6, 6, 6, 4, 2, 2],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ]
+
+    PST_BING_EG = [
+        [30, 30, 40, 50, 60, 50, 40, 30, 30],
+        [25, 25, 35, 45, 50, 45, 35, 25, 25],
+        [20, 20, 30, 40, 45, 40, 30, 20, 20],
+        [15, 15, 20, 30, 35, 30, 20, 15, 15],
+        [10, 10, 15, 20, 25, 20, 15, 10, 10],
+        [5, 5, 5, 10, 10, 10, 5, 5, 5],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -84,16 +110,78 @@ class Evaluation:
         [4, 5, 6, 7, 8, 7, 6, 5, 4],
     ]
 
+    # 红方视角（棋盘行 0=黑侧上方 … 9=红侧底线，列 0–8）
+    PST_PAO = [
+        [6, 4, 0, -10, -12, -10, 0, 4, 6],
+        [4, 2, 0, -8, -14, -8, 0, 2, 4],
+        [2, 0, 0, -6, -8, -6, 0, 0, 2],
+        [0, 0, 0, -2, -4, -2, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [-2, 0, 4, 2, 6, 2, 4, 0, -2],
+        [0, 0, 0, 2, 4, 2, 0, 0, 0],
+        [2, 2, 0, 4, 6, 4, 0, 2, 2],
+        [2, 2, 0, 4, 6, 4, 0, 2, 2],
+        [0, 0, 0, 2, 4, 2, 0, 0, 0],
+    ]
+
+    PST_SHI = [
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 15, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ]
+
+    PST_XIANG = [
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 2, 0, 0, 0, 2, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 15, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 2, 0, 0, 0, 2, 0, 0],
+    ]
+
+    PST_JIANG = [
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, -10, -10, -10, 0, 0, 0],
+        [0, 0, 0, -5, 0, -5, 0, 0, 0],
+        [0, 0, 0, 5, 15, 5, 0, 0, 0],
+    ]
+
     PST_DEFAULT = [[0] * 9 for _ in range(10)]
 
-    PST_MAP = {
-        "bing": PST_BING,
+    PST_MG_MAP: dict[str, list[list[int]]] = {
+        "bing": PST_BING_MG,
         "ma": PST_MA,
         "che": PST_CHE,
-        "shi": PST_DEFAULT,
-        "xiang": PST_DEFAULT,
-        "pao": PST_DEFAULT,
-        "jiang": PST_DEFAULT,
+        "shi": PST_SHI,
+        "xiang": PST_XIANG,
+        "pao": PST_PAO,
+        "jiang": PST_JIANG,
+    }
+    PST_EG_MAP: dict[str, list[list[int]]] = {
+        "bing": PST_BING_EG,
+        "ma": PST_MA,
+        "che": PST_CHE,
+        "shi": PST_SHI,
+        "xiang": PST_XIANG,
+        "pao": PST_PAO,
+        "jiang": PST_JIANG,
     }
 
     _MA_DELTAS = (
@@ -131,7 +219,7 @@ class Evaluation:
                 p = b[r][c]
                 if p is None or p.color != color_key:
                     continue
-                v = float(Evaluation.PIECE_VALUES.get(p.piece_type, 0))
+                v = float(Evaluation.MG_VALUES.get(p.piece_type, 0))
                 n += 1
                 if color_key == "red":
                     red_m += v
@@ -141,18 +229,26 @@ class Evaluation:
 
     @staticmethod
     def _ma_mobility(board: Board, sr: int, sc: int, color: str) -> float:
+        """马腿判定 + 机动分；落点为己方马时计连环马协同 +15。"""
         b = board.board
-        cnt = 0
+        bonus = 0.0
         for dr, dc in Evaluation._MA_DELTAS:
             er, ec = sr + dr, sc + dc
             if not (0 <= er < 10 and 0 <= ec < 9):
                 continue
+            if abs(dr) == 2:
+                leg_r, leg_c = sr + (1 if dr > 0 else -1), sc
+            else:
+                leg_r, leg_c = sr, sc + (1 if dc > 0 else -1)
+            if b[leg_r][leg_c] is not None:
+                continue
             tgt = b[er][ec]
             if tgt is not None and tgt.color == color:
+                if tgt.piece_type == "ma":
+                    bonus += 15.0
                 continue
-            if Rules._is_valid_ma_move(board, sr, sc, er, ec):
-                cnt += 1
-        return float(cnt * 5)
+            bonus += 5.0
+        return bonus
 
     @staticmethod
     def _pao_screen_bonus(board: Board, r: int, c: int, color: str) -> float:
@@ -214,88 +310,143 @@ class Evaluation:
 
     @staticmethod
     def evaluate(board: Board) -> float:
-        """评估函数（纯 Negamax 版）。
-
-        永远返回“当前即将行棋方（board.current_player）”的视角分数。
-        """
+        """Tapered Evaluation：中局/残局双轨按 ``phase`` 线性插值；Negamax 视角。"""
+        h = board.zobrist_hash
+        if h in Evaluation._eval_cache:
+            return Evaluation._eval_cache[h]
 
         b = board.board
-        pv = Evaluation.PIECE_VALUES
-        pst_map = Evaluation.PST_MAP
         attacking = Evaluation.ATTACKING_PIECE_TYPES
+        mg_map = Evaluation.PST_MG_MAP
+        eg_map = Evaluation.PST_EG_MAP
+        mgv = Evaluation.MG_VALUES
+        egv = Evaluation.EG_VALUES
+        pw = Evaluation.PHASE_WEIGHTS
 
-        red_attack = 0
-        black_attack = 0
+        red_attack = black_attack = 0
+        red_mg = red_eg = black_mg = black_eg = 0.0
+        phase = 0.0
+        total_mat = 0.0
+        red_shi = red_xiang = red_che = red_pao = 0
+        black_shi = black_xiang = black_che = black_pao = 0
+
         for color_key in ("red", "black"):
             for r, c in board.active_pieces.get(color_key, ()):
                 p = b[r][c]
                 if p is None or p.color != color_key:
                     continue
-                if p.piece_type in attacking:
+                pt = p.piece_type
+                if pt in attacking:
                     if color_key == "red":
                         red_attack += 1
                     else:
                         black_attack += 1
+                if pt == "shi":
+                    if color_key == "red":
+                        red_shi += 1
+                    else:
+                        black_shi += 1
+                elif pt == "xiang":
+                    if color_key == "red":
+                        red_xiang += 1
+                    else:
+                        black_xiang += 1
+                elif pt == "che":
+                    if color_key == "red":
+                        red_che += 1
+                    else:
+                        black_che += 1
+                elif pt == "pao":
+                    if color_key == "red":
+                        red_pao += 1
+                    else:
+                        black_pao += 1
+
+                phase += float(pw.get(pt, 0))
+                total_mat += float(mgv.get(pt, 0))
+
+                mg_base = float(mgv.get(pt, 0))
+                eg_base = float(egv.get(pt, 0))
+                pst_r = r if color_key == "red" else 9 - r
+                mg_tbl = mg_map.get(pt, Evaluation.PST_DEFAULT)
+                eg_tbl = eg_map.get(pt, Evaluation.PST_DEFAULT)
+                mg_pst = float(mg_tbl[pst_r][c])
+                eg_pst = float(eg_tbl[pst_r][c])
+
+                bonus = 0.0
+                if pt == "ma":
+                    bonus = Evaluation._ma_mobility(board, r, c, color_key)
+                elif pt == "pao":
+                    bonus = Evaluation._pao_screen_bonus(board, r, c, color_key)
+
+                b_mg = 0.0
+                b_eg = 0.0
+                if pt == "bing":
+                    if color_key == "red" and r <= 4:
+                        vert = float((4 - r) * 20)
+                        ctr = max(0.0, 15.0 - 5.0 * abs(c - 4))
+                        extra = vert + ctr
+                        if r == 0:
+                            extra += 80.0
+                        b_mg = b_eg = extra
+                    elif color_key == "black" and r >= 5:
+                        vert = float((r - 5) * 20)
+                        ctr = max(0.0, 15.0 - 5.0 * abs(c - 4))
+                        extra = vert + ctr
+                        if r == 9:
+                            extra += 80.0
+                        b_mg = b_eg = extra
+                elif pt == "che":
+                    if color_key == "red" and r <= 1:
+                        b_mg = b_eg = 30.0
+                    elif color_key == "black" and r >= 8:
+                        b_mg = b_eg = 30.0
+
+                acc_mg = mg_base + mg_pst + bonus + b_mg
+                acc_eg = eg_base + eg_pst + bonus + b_eg
+                if color_key == "red":
+                    red_mg += acc_mg
+                    red_eg += acc_eg
+                else:
+                    black_mg += acc_mg
+                    black_eg += acc_eg
+
         if red_attack == 0 and black_attack == 0:
+            Evaluation._eval_cache[h] = 0.0
             return 0.0
 
-        _, _, total_mat, piece_count = Evaluation._raw_material(board)
-        is_endgame = total_mat <= Evaluation._ENDGAME_MATERIAL or piece_count <= Evaluation._ENDGAME_PIECE_COUNT
+        red_pressure = Evaluation._palace_pressure(board, "red")
+        black_pressure = Evaluation._palace_pressure(board, "black")
+        red_mg += red_pressure
+        red_eg += red_pressure
+        black_mg += black_pressure
+        black_eg += black_pressure
 
-        red_score = 0.0
-        black_score = 0.0
+        if red_xiang < 2 and black_pao > 0:
+            black_mg += 30.0
+            black_eg += 30.0
+        if black_xiang < 2 and red_pao > 0:
+            red_mg += 30.0
+            red_eg += 30.0
+        if red_shi < 2 and black_che == 2:
+            black_mg += 50.0
+            black_eg += 50.0
+        if black_shi < 2 and red_che == 2:
+            red_mg += 50.0
+            red_eg += 50.0
 
-        for r, c in board.active_pieces.get("red", ()):
-            piece = b[r][c]
-            if piece is None or piece.color != "red":
-                continue
-            pt = piece.piece_type
-            base = float(pv.get(pt, 0))
-            pst = pst_map.get(pt, Evaluation.PST_DEFAULT)
-            red_score += base + float(pst[r][c])
-            if pt == "bing" and r <= 4:
-                step = float((4 - r) * 20)
-                if is_endgame:
-                    step *= 2.5
-                red_score += step
-                if r == 0:
-                    red_score += 80.0
-            if pt == "che" and r <= 1:
-                red_score += 30.0
-            if pt == "ma":
-                red_score += Evaluation._ma_mobility(board, r, c, "red")
-            if pt == "pao":
-                red_score += Evaluation._pao_screen_bonus(board, r, c, "red")
-
-        for r, c in board.active_pieces.get("black", ()):
-            piece = b[r][c]
-            if piece is None or piece.color != "black":
-                continue
-            pt = piece.piece_type
-            base = float(pv.get(pt, 0))
-            pst = pst_map.get(pt, Evaluation.PST_DEFAULT)
-            black_score += base + float(pst[9 - r][c])
-            if pt == "bing" and r >= 5:
-                step = float((r - 5) * 20)
-                if is_endgame:
-                    step *= 2.5
-                black_score += step
-                if r == 9:
-                    black_score += 80.0
-            if pt == "che" and r >= 8:
-                black_score += 30.0
-            if pt == "ma":
-                black_score += Evaluation._ma_mobility(board, r, c, "black")
-            if pt == "pao":
-                black_score += Evaluation._pao_screen_bonus(board, r, c, "black")
-
-        red_score += Evaluation._palace_pressure(board, "red")
-        black_score += Evaluation._palace_pressure(board, "black")
+        phase = min(phase, Evaluation.TOTAL_PHASE)
+        tp = Evaluation.TOTAL_PHASE
+        red_score = (red_mg * phase + red_eg * (tp - phase)) / tp
+        black_score = (black_mg * phase + black_eg * (tp - phase)) / tp
 
         red_score, black_score = Evaluation._apply_anti_trading(red_score, black_score, total_mat)
 
         opp = "black" if board.current_player == "red" else "red"
         check_bonus = 15.0 if Rules.is_king_in_check(board, opp) else 0.0
         if board.current_player == "red":
-            return red_score - black_score + check_bonus
-        return black_score - red_score + check_bonus
+            res = red_score - black_score + check_bonus
+        else:
+            res = black_score - red_score + check_bonus
+        Evaluation._eval_cache[h] = res
+        return res
