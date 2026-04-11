@@ -81,6 +81,8 @@ class GameController:
 
         # 全局对局 Zobrist 局面链（含当前盘面），供 Minimax 重复局面检测与规则判和
         self.game_history_hashes: List[int] = [self.board.zobrist_hash]
+        # 与 ``game_history_hashes[1:]`` 对齐：每手走后是否「对方老将处于被将军状态」
+        self.ply_gave_check_history: List[bool] = []
 
     def agent_for(self, color: str):
         """返回指定方的 agent；None 表示人类。必须与 board.current_player 的 'red'/'black' 一致使用。"""
@@ -93,7 +95,16 @@ class GameController:
     def can_move(self, move: Tuple[int, int, int, int], player: Optional[str] = None) -> bool:
         """Check if a move is legal for player on current board."""
         sr, sc, er, ec = move
-        ok, _ = Rules.is_valid_move(self.board, sr, sc, er, ec, player=player)
+        ok, _ = Rules.is_valid_move(
+            self.board,
+            sr,
+            sc,
+            er,
+            ec,
+            player=player,
+            state_hashes=self.game_history_hashes,
+            ply_gave_check=self.ply_gave_check_history,
+        )
         return ok
 
     # --- Stable interface for Views (GUI/CLI) ---
@@ -106,23 +117,23 @@ class GameController:
     def apply_move(self, move: Tuple[int, int, int, int], player: Optional[str] = None) -> MoveOutcome:
         """Apply a move if legal, otherwise return a failure outcome."""
         sr, sc, er, ec = move
-        ok, reason = Rules.is_valid_move(self.board, sr, sc, er, ec, player=player)
+        ok, reason = Rules.is_valid_move(
+            self.board,
+            sr,
+            sc,
+            er,
+            ec,
+            player=player,
+            state_hashes=self.game_history_hashes,
+            ply_gave_check=self.ply_gave_check_history,
+        )
         if not ok:
             detail = reason or "未知原因"
             return MoveOutcome(ok=False, message=f"非法走法：{detail}")
         mover = self.board.current_player
         captured = self.board.apply_move(sr, sc, er, ec)
-        human_mover = (mover == "red" and self.red_agent is None) or (
-            mover == "black" and self.black_agent is None
-        )
-        if human_mover and self.board.get_repetition_count() >= 3:
-            opponent = self.board.current_player
-            if Rules.is_king_in_check(self.board, opponent):
-                msg = "警告：禁止长将！请变着。"
-            else:
-                msg = "警告：检测到违规长捉或无理重复，请变着！"
-            self.board.undo_move(sr, sc, er, ec, captured)
-            return MoveOutcome(ok=False, message=msg)
+        opp = self.board.current_player
+        self.ply_gave_check_history.append(Rules.is_king_in_check(self.board, opp))
         self.game_history_hashes.append(self.board.zobrist_hash)
         over = Rules.is_game_over(self.board, position_history=self.game_history_hashes)
         win: Optional[str] = Rules.winner(self.board) if over else None
@@ -133,6 +144,8 @@ class GameController:
         self.board.undo_move(sr, sc, er, ec, captured)
         if len(self.game_history_hashes) > 1:
             self.game_history_hashes.pop()
+        if self.ply_gave_check_history:
+            self.ply_gave_check_history.pop()
 
     def is_game_over(self) -> bool:
         return Rules.is_game_over(self.board, position_history=self.game_history_hashes)
@@ -161,6 +174,7 @@ class GameController:
 
         self.board = Board()
         self.game_history_hashes = [self.board.zobrist_hash]
+        self.ply_gave_check_history = []
 
     def matchup_line(self) -> str:
         """当前控制器绑定的红黑对阵说明（供 CLI/GUI 打印）。"""

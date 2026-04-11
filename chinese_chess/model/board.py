@@ -211,6 +211,33 @@ class Board:
         }
         return new_board
 
+    def column_mirror_copy(self) -> "Board":
+        """左右镜像棋盘（列 ``c`` → ``8-c``），子力不变；用于开局库 Zobrist 对称查表。"""
+        nb = Board.__new__(Board)
+        nb.rows = 10
+        nb.cols = 9
+        nb.board = [[None] * 9 for _ in range(10)]
+        nb.active_pieces = {"red": set(), "black": set()}
+        nb.red_king_pos = None
+        nb.black_king_pos = None
+        for r in range(10):
+            for c in range(9):
+                p = self.board[r][c]
+                if p is None:
+                    continue
+                mc = 8 - c
+                nb.board[r][mc] = p
+                nb.active_pieces[p.color].add((r, mc))
+                if p.piece_type == "jiang":
+                    if p.color == "red":
+                        nb.red_king_pos = (r, mc)
+                    else:
+                        nb.black_king_pos = (r, mc)
+        nb.current_player = self.current_player
+        nb.zobrist_hash = zobrist.full_hash(nb)
+        nb.state_counts = {nb.zobrist_hash: 1}
+        return nb
+
     def __str__(self):
         # 将棋盘渲染为简单文本表格，便于在控制台打印查看。
         result = ""

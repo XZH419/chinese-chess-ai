@@ -14,7 +14,7 @@ from chinese_chess.model import zobrist
 from chinese_chess.model.rules import Rules
 
 from .evaluation import Evaluation
-from .opening_book import OPENING_BOOK
+from .opening_book import OPENING_BOOK, mirror_move
 
 # 置换表边界类型（与当前 alpha/beta 窗口配合使用）
 _TT_EXACT = 0  # 精确值：alpha < score < beta
@@ -239,29 +239,40 @@ class MinimaxAI:
         ``time_limit`` 仅为接口兼容保留，本实现中不在根迭代加深路径上启用。
         """
         Evaluation._eval_cache.clear()
-        gh_book = game_history if game_history is not None else []
-        if len(gh_book) < 30:
+        move_history: List[int] = [] if game_history is None else list(game_history)
+        if len(move_history) < 30:
             zkey = board.zobrist_hash
-            if zkey in OPENING_BOOK:
-                book_moves = OPENING_BOOK[zkey]
-                if book_moves:
-                    valid = [
-                        m
-                        for m in book_moves
-                        if Rules.is_valid_move(board, m[0], m[1], m[2], m[3])[0]
-                    ]
-                    if valid:
-                        picked = random.choice(valid)
-                        if self.verbose:
-                            print(f"命中开局库！瞬间出棋: {picked}")
-                        self.last_stats = {
-                            "depth": int(self.depth),
-                            "time_taken": 0.0,
-                            "nodes_evaluated": 0,
-                            "tt_hits": 0,
-                            "opening_book": True,
-                        }
-                        return picked
+            book_moves = OPENING_BOOK.get(zkey)
+            if book_moves is None:
+                zm = board.column_mirror_copy().zobrist_hash
+                alt = OPENING_BOOK.get(zm)
+                if alt is not None:
+                    book_moves = [mirror_move(m) for m in alt]
+            if book_moves is None and len(move_history) == 0:
+                keys = list(OPENING_BOOK.keys())
+                disp = keys if len(keys) <= 48 else keys[:24] + ["..."] + keys[-16:]
+                print(
+                    f"[opening book] 根局面未命中（zkey={zkey:#x}）；"
+                    f"OPENING_BOOK 共 {len(keys)} 个键: {disp}"
+                )
+            if book_moves:
+                valid = [
+                    m
+                    for m in book_moves
+                    if Rules.is_valid_move(board, m[0], m[1], m[2], m[3])[0]
+                ]
+                if valid:
+                    picked = random.choice(valid)
+                    if self.verbose:
+                        print(f"命中开局库！瞬间出棋: {picked}")
+                    self.last_stats = {
+                        "depth": int(self.depth),
+                        "time_taken": 0.0,
+                        "nodes_evaluated": 0,
+                        "tt_hits": 0,
+                        "opening_book": True,
+                    }
+                    return picked
 
         bench_t0 = time.time()
         self._nodes = 0
@@ -273,12 +284,12 @@ class MinimaxAI:
             self.eval_table.clear()
 
         # 外部可传入从开局到当前局面的完整哈希链；若末尾已是当前局面则不再重复追加
-        self.history_hashes = list(game_history) if game_history else []
+        self.history_hashes = list(move_history)
         if not self.history_hashes or self.history_hashes[-1] != board.zobrist_hash:
             self.history_hashes.append(board.zobrist_hash)
 
         global_best_move: Optional[Tuple[int, int, int, int]] = None
-        gh_len = len(game_history) if game_history else 0
+        gh_len = len(move_history)
         midgame_no_random = gh_len > 20
 
         # Aspiration Windows：期望窗口宽度（约一兵 / 半马量级）
