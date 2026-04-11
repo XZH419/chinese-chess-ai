@@ -11,9 +11,20 @@
 
 from __future__ import annotations
 
-from typing import Iterator, List, Optional, Tuple
+from typing import Iterator, List, NamedTuple, Optional, Tuple
 
 from .board import Board
+
+
+class MoveEntry(NamedTuple):
+    """对局历史中的一条记录，与单步走子一一对应。
+
+    ``history[0]`` 为初始局面（走子前），其 ``mover`` 和 ``gave_check`` 均为 ``None``。
+    ``history[i]``（i >= 1）记录第 i 手走后的局面哈希、行棋方及是否将军。
+    """
+    pos_hash: int
+    mover: Optional[str] = None
+    gave_check: Optional[bool] = None
 
 # 非法走法说明（供 GUI / Controller 展示）
 _MSG_FRIENDLY_FIRE = "友军误伤"
@@ -53,36 +64,41 @@ class Rules:
         return sr, (sc + ec) // 2
 
     @staticmethod
-    def _mover_for_move_index(move_index: int) -> str:
-        """第 ``move_index`` 手（0 起）轮到谁走：红先。"""
-        return "red" if move_index % 2 == 0 else "black"
-
-    @staticmethod
     def _long_check_violation(
         mover: str,
-        state_hashes: List[int],
-        ply_gave_check: List[bool],
+        history: List[MoveEntry],
         board_after_move: Board,
     ) -> Optional[str]:
-        """若本步将导致第三次相同局面且循环内该方着法均为将军，返回 ``_MSG_LONG_CHECK``。"""
+        """若本步将导致第三次相同局面且循环内该方着法均为将军，返回 ``_MSG_LONG_CHECK``。
+
+        ``history`` 为截止到走子前的完整历史（含初始局面占位项）；
+        本函数自行计算走子后的哈希与将军状态，无需调用者预先存入。
+        """
         h_new = board_after_move.zobrist_hash
-        n_prior = sum(1 for h in state_hashes if h == h_new)
+        n_prior = sum(1 for e in history if e.pos_hash == h_new)
         if n_prior < 2:
             return None
-        idxs = [i for i, h in enumerate(state_hashes) if h == h_new]
-        r = idxs[-1]
-        k = len(state_hashes) - 1
+        # 找到最后一次出现该哈希的索引，取其后续区间作为循环节
+        last_idx = -1
+        for i in range(len(history) - 1, -1, -1):
+            if history[i].pos_hash == h_new:
+                last_idx = i
+                break
+        # 循环节 = history[last_idx+1 :] + 本步（尚未入栈）
         sim_gave_check = Rules.is_king_in_check(
             board_after_move, board_after_move.current_player
         )
         found = False
-        for m in range(r, k + 1):
-            if Rules._mover_for_move_index(m) != mover:
+        for entry in history[last_idx + 1:]:
+            if entry.mover != mover:
                 continue
             found = True
-            chk = ply_gave_check[m] if m < len(ply_gave_check) else sim_gave_check
-            if not chk:
+            if not entry.gave_check:
                 return None
+        # 本步（即将入栈的条目）也属于 mover
+        found = True
+        if not sim_gave_check:
+            return None
         if not found:
             return None
         return _MSG_LONG_CHECK
@@ -96,18 +112,22 @@ class Rules:
         end_col,
         player=None,
         check_legality=True,
-        state_hashes: Optional[List[int]] = None,
-        ply_gave_check: Optional[List[bool]] = None,
+        history: Optional[List[MoveEntry]] = None,
     ) -> Tuple[bool, str]:
         """检查指定棋子走子是否合法；返回 ``(是否合法, 错误原因)``。
 
-        合法时为 ``(True, "")``。``check_legality=False`` 时仅做几何与吃子规则，不做将军/飞将模拟。
+        Args:
+            board: 当前棋盘。
+            start_row, start_col: 起点。
+            end_row, end_col: 终点。
+            player: 行棋方，缺省取 ``board.current_player``。
+            check_legality: 为 ``False`` 时仅做几何与吃子规则，不做将军/飞将模拟。
+            history: 完整的对局历史记录（``List[MoveEntry]``），含初始局面占位项。
+                提供时额外检测「长将」违规。
 
-        ``state_hashes``：自开局起每步后的 Zobrist 链 ``[H0, H1, …, Hk]``（含当前盘末）；
-        ``ply_gave_check``：与 ``H1…Hk`` 对齐的将军标记，``ply_gave_check[i]`` 表示第 ``i`` 手走后对方是否被将军。
-        二者皆提供时检测「长将」第三次重复。
+        Returns:
+            ``(True, "")`` 或 ``(False, 错误原因)``。
         """
-
         player = player or board.current_player
         if not (
             0 <= start_row < 10
@@ -141,15 +161,11 @@ class Rules:
         still_in_check = Rules.is_king_in_check(board, player)
         long_chk: Optional[str] = None
         if (
-            state_hashes is not None
-            and ply_gave_check is not None
-            and len(ply_gave_check) == len(state_hashes) - 1
+            history is not None
             and not kings_facing
             and not still_in_check
         ):
-            long_chk = Rules._long_check_violation(
-                player, state_hashes, ply_gave_check, board
-            )
+            long_chk = Rules._long_check_violation(player, history, board)
         board.undo_move(start_row, start_col, end_row, end_col, captured)
 
         if kings_facing:
@@ -302,11 +318,9 @@ class Rules:
         board: Board,
         player,
         validate_self_check=True,
-        state_hashes: Optional[List[int]] = None,
-        ply_gave_check: Optional[List[bool]] = None,
+        history: Optional[List[MoveEntry]] = None,
     ):
-        # 生成指定方的所有合法走法。
-        # 如果 validate_self_check 为 True，则返回的走法不会使己方被将军。
+        """生成指定方的所有走法；``validate_self_check=True`` 时过滤自将/长将。"""
         moves = []
         for r, c in board.active_pieces[player]:
             piece = board.board[r][c]
@@ -322,8 +336,7 @@ class Rules:
                     ec,
                     player=player,
                     check_legality=validate_self_check,
-                    state_hashes=state_hashes,
-                    ply_gave_check=ply_gave_check,
+                    history=history,
                 )
                 if ok:
                     moves.append((r, c, er, ec))
@@ -535,16 +548,14 @@ class Rules:
     def get_legal_moves(
         board: Board,
         player,
-        state_hashes: Optional[List[int]] = None,
-        ply_gave_check: Optional[List[bool]] = None,
+        history: Optional[List[MoveEntry]] = None,
     ):
         """合法走法；被将军时仅返回能解除己方老将受攻的着法（经 ``is_valid_move`` 过滤）。"""
         return Rules.get_all_moves(
             board,
             player,
             validate_self_check=True,
-            state_hashes=state_hashes,
-            ply_gave_check=ply_gave_check,
+            history=history,
         )
 
     @staticmethod

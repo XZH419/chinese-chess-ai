@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 from chinese_chess.model.board import Board
-from chinese_chess.model.rules import Rules
+from chinese_chess.model.rules import MoveEntry, Rules
 
 
 def describe_player_agent(agent: Optional[Any]) -> str:
@@ -79,10 +79,11 @@ class GameController:
         self.red_agent = red_agent
         self.black_agent = black_agent
 
-        # 全局对局 Zobrist 局面链（含当前盘面），供 Minimax 重复局面检测与规则判和
-        self.game_history_hashes: List[int] = [self.board.zobrist_hash]
-        # 与 ``game_history_hashes[1:]`` 对齐：每手走后是否「对方老将处于被将军状态」
-        self.ply_gave_check_history: List[bool] = []
+        # 完整对局历史：history[0] 为初始局面（mover/gave_check 为 None），
+        # history[i>=1] 记录第 i 手走后的局面哈希、行棋方及是否将军。
+        self.history: List[MoveEntry] = [
+            MoveEntry(pos_hash=self.board.zobrist_hash)
+        ]
 
     def agent_for(self, color: str):
         """返回指定方的 agent；None 表示人类。必须与 board.current_player 的 'red'/'black' 一致使用。"""
@@ -96,14 +97,9 @@ class GameController:
         """Check if a move is legal for player on current board."""
         sr, sc, er, ec = move
         ok, _ = Rules.is_valid_move(
-            self.board,
-            sr,
-            sc,
-            er,
-            ec,
+            self.board, sr, sc, er, ec,
             player=player,
-            state_hashes=self.game_history_hashes,
-            ply_gave_check=self.ply_gave_check_history,
+            history=self.history,
         )
         return ok
 
@@ -114,18 +110,18 @@ class GameController:
         """尝试让玩家走一步（失败不会改变棋盘状态）。"""
         return self.apply_move(move, player=player)
 
+    @property
+    def game_history_hashes(self) -> List[int]:
+        """向后兼容属性：从 ``history`` 中提取纯 Zobrist 哈希链（供 AI / 重复判和）。"""
+        return [e.pos_hash for e in self.history]
+
     def apply_move(self, move: Tuple[int, int, int, int], player: Optional[str] = None) -> MoveOutcome:
         """Apply a move if legal, otherwise return a failure outcome."""
         sr, sc, er, ec = move
         ok, reason = Rules.is_valid_move(
-            self.board,
-            sr,
-            sc,
-            er,
-            ec,
+            self.board, sr, sc, er, ec,
             player=player,
-            state_hashes=self.game_history_hashes,
-            ply_gave_check=self.ply_gave_check_history,
+            history=self.history,
         )
         if not ok:
             detail = reason or "未知原因"
@@ -133,22 +129,26 @@ class GameController:
         mover = self.board.current_player
         captured = self.board.apply_move(sr, sc, er, ec)
         opp = self.board.current_player
-        self.ply_gave_check_history.append(Rules.is_king_in_check(self.board, opp))
-        self.game_history_hashes.append(self.board.zobrist_hash)
-        over = Rules.is_game_over(self.board, position_history=self.game_history_hashes)
+        gave_check = Rules.is_king_in_check(self.board, opp)
+        self.history.append(MoveEntry(
+            pos_hash=self.board.zobrist_hash,
+            mover=mover,
+            gave_check=gave_check,
+        ))
+        pos_hashes = self.game_history_hashes
+        over = Rules.is_game_over(self.board, position_history=pos_hashes)
         win: Optional[str] = Rules.winner(self.board) if over else None
         return MoveOutcome(ok=True, captured=captured, game_over=over, winner=win)
 
     def undo_move(self, move: Tuple[int, int, int, int], captured) -> None:
         sr, sc, er, ec = move
         self.board.undo_move(sr, sc, er, ec, captured)
-        if len(self.game_history_hashes) > 1:
-            self.game_history_hashes.pop()
-        if self.ply_gave_check_history:
-            self.ply_gave_check_history.pop()
+        if len(self.history) > 1:
+            self.history.pop()
 
     def is_game_over(self) -> bool:
         return Rules.is_game_over(self.board, position_history=self.game_history_hashes)
+
 
     def winner(self) -> Optional[str]:
         """返回胜者颜色字符串：'red'/'black'/None。"""
@@ -173,8 +173,7 @@ class GameController:
         """
 
         self.board = Board()
-        self.game_history_hashes = [self.board.zobrist_hash]
-        self.ply_gave_check_history = []
+        self.history = [MoveEntry(pos_hash=self.board.zobrist_hash)]
 
     def matchup_line(self) -> str:
         """当前控制器绑定的红黑对阵说明（供 CLI/GUI 打印）。"""
