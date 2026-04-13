@@ -596,7 +596,8 @@ class MainWindow(QMainWindow):
             return f"Minimax 深度={d}" if isinstance(d, int) else "Minimax"
         if cls == "MCTSAI":
             s = getattr(agent, "max_simulations", None)
-            return f"MCTS {s} sims" if s else "MCTS"
+            w = getattr(agent, "workers", 1)
+            return f"MCTS {s}sims/{w}w" if s else "MCTS"
         if cls == "RandomAI":
             return "Random"
         return cls
@@ -625,10 +626,15 @@ class MainWindow(QMainWindow):
         self._refresh_status()
         if outcome.game_over:
             self._run_id += 1
-            if outcome.winner is None:
+            if outcome.winner == "red":
+                msg = "游戏结束：红方获胜！"
+            elif outcome.winner == "black":
+                msg = "游戏结束：黑方获胜！"
+            else:
                 msg = "游戏结束：和棋（死局或三次重复）！"
-                self.append_log(msg)
-                QMessageBox.information(self, "对局结束", msg)
+            self.append_log(msg)
+            self.append_log("==========================")
+            QMessageBox.information(self, "对局结束", msg)
             self._game_over_ui()
             return
         self.check_and_run_ai()
@@ -712,6 +718,7 @@ class MainWindow(QMainWindow):
 
         print(f"[UI] player move applied: {move}")
         self.append_log(f"[UI] 玩家落子: {move}")
+        self.append_log("--------------------------")
         self.board_view.animate_move(move)
         self._finalize_after_legal_move(outcome)
 
@@ -773,7 +780,8 @@ class MainWindow(QMainWindow):
             )
             sims = stats.get("simulations")
             if sims is not None:
-                self.append_log(f"MCTS 模拟次数: {sims}")
+                workers = stats.get("workers", 1)
+                self.append_log(f"MCTS 模拟次数: {sims}  (workers: {workers})")
             else:
                 depth = stats.get("depth", "?")
                 nodes = stats.get("nodes_evaluated", "?")

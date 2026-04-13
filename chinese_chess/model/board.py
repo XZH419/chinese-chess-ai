@@ -93,6 +93,10 @@ class Board:
         self.zobrist_hash = zobrist.full_hash(self)
         self.state_counts[self.zobrist_hash] = 1
 
+    def piece_count(self) -> int:
+        """棋盘上存活棋子总数。"""
+        return len(self.active_pieces["red"]) + len(self.active_pieces["black"])
+
     def get_repetition_count(self) -> int:
         return self.state_counts.get(self.zobrist_hash, 0)
 

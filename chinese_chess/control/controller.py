@@ -28,7 +28,8 @@ def describe_player_agent(agent: Optional[Any]) -> str:
         return "Random"
     if cls == "MCTSAI":
         sims = getattr(agent, "max_simulations", None)
-        return f"MCTS, Sims={sims}" if sims is not None else "MCTS"
+        w = getattr(agent, "workers", 1)
+        return f"MCTS, Sims={sims}, Workers={w}" if sims is not None else "MCTS"
     return cls
 
 
