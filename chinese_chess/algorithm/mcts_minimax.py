@@ -81,16 +81,114 @@ _TT_LOWER = 1
 _TT_UPPER = 2
 
 # ═══════════════════════════════════════════════════════════════
-#  Probe 触发条件常量
+#  Probe 多因子触发 · 评分阈值 · 概率 · 预算 · 冷却
 # ═══════════════════════════════════════════════════════════════
 
-_ENDGAME_PIECE_THRESHOLD = 14  # 子力 ≤ 此值视为残局，强制 probe
+# ── 残局阶段子力阈值 ──
+_ENDGAME_PIECE_THRESHOLD = 14  # 子力 ≤ 此值视为残局阶段
+
+# ── 评分因子权重 ──
+# 各因子叠加后与阈值比较，决定 probe level（0/1/2）
+_SCORE_DEEP_ENDGAME = 4    # piece_count <= 10（恰好达到 THRESHOLD_LIGHT，
+                           # 使非安静深残局以 40% 概率获得 Level 1 轻量 probe）
+_SCORE_EARLY_ENDGAME = 2   # 10 < piece_count <= 14
+_SCORE_LATE_MIDGAME = 1    # 14 < piece_count <= 20
+_SCORE_IN_CHECK = 5         # 当前行棋方被将军（最强战术信号）
+_SCORE_OPP_IN_CHECK = 4     # 对方被将军（rollout 末步给将或伪合法送将）
+_SCORE_LAST_CAPTURE = 2     # rollout 末步是吃子（战术转换点）
+_SCORE_HIGH_VISITS = 2      # 展开节点访问 ≥ 此阈值 → 重要分支
+_HIGH_VISIT_THRESHOLD = 8   # 用于上条因子的节点访问数门槛
+
+# ── 安静局面惩罚 ──
+_QUIET_SCORE_PENALTY = 3    # 安静残局扣分（无将军 + 无攻击线）
+
+# ── 预算/冷却惩罚 ──
+_BUDGET_EXHAUSTED_PENALTY = 6  # 预算耗尽时的评分惩罚（几乎必然降到 Level 0）
+_COOLDOWN_PENALTY = 3          # 冷却期内的评分惩罚
+
+# ── 分级阈值 ──
+_PROBE_SCORE_THRESHOLD_LIGHT = 4   # 评分 ≥ 此值 → 候选 Level 1 (轻量 probe)
+_PROBE_SCORE_THRESHOLD_FULL = 7    # 评分 ≥ 此值 → 候选 Level 2 (标准 probe)
+
+# ── 概率触发 ──
+# 达到阈值后仍通过概率门控，避免锁死在 100% 触发
+_PROBE_PROB_LIGHT = 0.40   # Level 1 触发概率
+_PROBE_PROB_FULL = 0.80    # Level 2 触发概率
+
+# ── 冷却 ──
+_PROBE_COOLDOWN_SIMS = 5   # 两次 probe 之间最少间隔模拟数
+
+# ── per-tree 预算 ──
+_MAX_PROBE_RATIO = 0.25           # probe 次数上限 = max_sims × ratio
+_MAX_PROBE_NODES_PER_TREE = 25_000  # 每棵树 probe 节点数上限
+
+# ── 分级 probe 深度配置 ──
+_LIGHT_PROBE_DEPTH = 1       # Level 1 轻量 probe 主搜索深度
+_LIGHT_PROBE_QS_DEPTH = 2    # Level 1 轻量 probe 静止搜索深度
 
 # ═══════════════════════════════════════════════════════════════
 #  类型别名
 # ═══════════════════════════════════════════════════════════════
 
 Move4 = Tuple[int, int, int, int]
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ProbeBudget —— per-tree probe 预算 / 冷却追踪器
+# ═══════════════════════════════════════════════════════════════
+
+
+class ProbeBudget:
+    """单棵搜索树的 probe 预算与冷却状态。
+
+    在 ``_run_single_hybrid_tree`` 开始时创建，伴随整棵树的生命周期。
+    多进程 worker 各自持有独立实例，无需加锁。
+
+    Attributes:
+        probe_calls: 本棵树已消耗的 probe 调用次数。
+        probe_nodes: 本棵树所有 probe 累计访问的搜索节点数。
+        max_probe_calls: 允许的最大 probe 调用次数。
+        max_probe_nodes: 允许的最大 probe 累计节点数。
+        last_probe_sim: 上次触发 probe 时的模拟序号（用于冷却计算）。
+    """
+
+    __slots__ = (
+        "probe_calls",
+        "probe_nodes",
+        "max_probe_calls",
+        "max_probe_nodes",
+        "last_probe_sim",
+    )
+
+    def __init__(self, max_simulations: int):
+        self.probe_calls: int = 0
+        self.probe_nodes: int = 0
+        self.max_probe_calls: int = max(10, int(max_simulations * _MAX_PROBE_RATIO))
+        self.max_probe_nodes: int = _MAX_PROBE_NODES_PER_TREE
+        # 初始设为负值，使首次 probe 不受冷却限制
+        self.last_probe_sim: int = -_PROBE_COOLDOWN_SIMS
+
+    @property
+    def is_calls_exhausted(self) -> bool:
+        return self.probe_calls >= self.max_probe_calls
+
+    @property
+    def is_nodes_exhausted(self) -> bool:
+        return self.probe_nodes >= self.max_probe_nodes
+
+    @property
+    def is_any_exhausted(self) -> bool:
+        return self.is_calls_exhausted or self.is_nodes_exhausted
+
+    def is_cooldown_active(self, current_sim: int) -> bool:
+        """当前模拟是否处于冷却期（距上次 probe 间隔不足）。"""
+        return (current_sim - self.last_probe_sim) < _PROBE_COOLDOWN_SIMS
+
+    def record_probe(self, current_sim: int, nodes_used: int) -> None:
+        """记录一次 probe 消耗。"""
+        self.probe_calls += 1
+        self.probe_nodes += nodes_used
+        self.last_probe_sim = current_sim
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -284,7 +382,14 @@ def _probe_qs(
     """静止搜索：仅扩展吃子走法，缓解水平线效应。
 
     含 stand-pat 评估和 Delta Pruning，与 minimax.py 的 QS 逻辑一致。
+    当 per-tree 节点预算耗尽时，立即回退到静态评估（安全阀）。
     """
+    # 节点预算安全阀：避免单次高开销 probe 拖垮整棵树的吞吐量
+    budget: Optional[ProbeBudget] = probe_state.get("budget")
+    if budget is not None and probe_state["nodes"] >= budget.max_probe_nodes:
+        probe_state["nodes"] += 1
+        return Evaluation.evaluate(board)
+
     if qs_depth <= 0:
         probe_state["nodes"] += 1
         return Evaluation.evaluate(board)
@@ -344,12 +449,22 @@ def _probe_negamax(
     probe_state: dict,
     *,
     check_ext_left: int = _PROBE_MAX_CHECK_EXT,
+    qs_depth_limit: int = _PROBE_QS_DEPTH_LIMIT,
 ) -> float:
     """轻量级 negamax + alpha-beta 搜索。
 
     含 TT 查询/写入、走法排序、killer/history 更新和将军延伸，
     不含 PVS / 空步剪枝 / 迭代加深 / 期望窗口。
+
+    ``qs_depth_limit`` 控制叶节点 QS 递归深度——Level 1 轻量 probe
+    使用更浅的 QS（``_LIGHT_PROBE_QS_DEPTH``）以降低单次 probe 成本。
     """
+    # 节点预算安全阀：全树累计节点超限时回退到静态评估
+    budget: Optional[ProbeBudget] = probe_state.get("budget")
+    if budget is not None and probe_state["nodes"] >= budget.max_probe_nodes:
+        probe_state["nodes"] += 1
+        return Evaluation.evaluate(board)
+
     alpha_orig = alpha
     key = board.zobrist_hash
     tt = probe_state["tt"]
@@ -361,7 +476,7 @@ def _probe_negamax(
 
     # 深度耗尽 → 静止搜索
     if depth <= 0:
-        return _probe_qs(board, alpha, beta, _PROBE_QS_DEPTH_LIMIT, probe_state)
+        return _probe_qs(board, alpha, beta, qs_depth_limit, probe_state)
 
     moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
     _probe_order_moves(board, moves, probe_state, depth)
@@ -388,7 +503,7 @@ def _probe_negamax(
 
         score = -_probe_negamax(
             board, next_depth, -beta, -alpha, probe_state,
-            check_ext_left=next_ext,
+            check_ext_left=next_ext, qs_depth_limit=qs_depth_limit,
         )
         board.undo_move(*move, captured)
 
@@ -420,37 +535,118 @@ def _probe_negamax(
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Probe 触发判定
+#  Probe 智能触发判定（多因子评分 + 概率 + 预算 + 冷却）
 # ═══════════════════════════════════════════════════════════════
 
 
-def _should_use_probe(board: Board, piece_count: int) -> bool:
-    """判定 rollout 截断点是否应使用 minimax probe。
+def _is_quiet_endgame(board: Board) -> bool:
+    """O(n) 轻量安静残局检测：双方主要攻击子是否与对方将帅有纵横/马步接触。
 
-    触发条件（任一满足即触发）：
-    1. 残局（子力 ≤ 阈值）：静态评估在残局中误差更大，probe 价值高。
-    2. 当前行棋方被将军：战术紧张，纯静态评估可能严重失真。
-    3. 对方处于被将军状态：说明 rollout 末步是非法送将（伪合法 rollout
-       不校验自将），此类局面需要更深评估。
+    遍历双方活跃棋子，若任意车/炮与敌方将同行或同列、或马与敌方将呈
+    日字距离，则认为存在即时威胁线，局面不安静。否则为安静残局——
+    双方暂时无法直接威胁将帅，静态评估的误差较小。
+
+    开销：O(n) 其中 n = 双方活跃棋子总数（残局通常 ≤ 14）。
     """
-    if piece_count <= _ENDGAME_PIECE_THRESHOLD:
-        return True
-    cp = board.current_player
-    if Rules.is_king_in_check(board, cp):
-        return True
-    opp = "black" if cp == "red" else "red"
-    if Rules.is_king_in_check(board, opp):
-        return True
-    return False
+    b = board.board
+    rkp = board.red_king_pos
+    bkp = board.black_king_pos
+    if rkp is None or bkp is None:
+        return False
+    for color, (ekr, ekc) in [("red", bkp), ("black", rkp)]:
+        for r, c in board.active_pieces.get(color, ()):
+            p = b[r][c]
+            if p is None:
+                continue
+            pt = p.piece_type
+            if pt in ("che", "pao") and (r == ekr or c == ekc):
+                return False
+            if pt == "ma":
+                dr, dc = abs(r - ekr), abs(c - ekc)
+                if (dr, dc) in ((1, 2), (2, 1)):
+                    return False
+    return True
 
 
 def _probe_depth_for_position(piece_count: int, is_in_check: bool) -> int:
-    """根据局面特征决定 probe 深度。"""
+    """根据局面特征决定 Level 2 标准 probe 的搜索深度。"""
     if piece_count <= 10:
         return _PROBE_ENDGAME_DEPTH
     if is_in_check or piece_count <= _ENDGAME_PIECE_THRESHOLD:
         return _PROBE_TACTICAL_DEPTH
     return _PROBE_DEFAULT_DEPTH
+
+
+def _compute_probe_level(
+    board: Board,
+    piece_count: int,
+    budget: ProbeBudget,
+    sims_done: int,
+    *,
+    is_last_capture: bool = False,
+    node_visits: int = 0,
+) -> int:
+    """多因子评分式 probe 触发判定，返回 probe 等级 0 / 1 / 2。
+
+    评分流程：
+    1. 按子力阶段、战术信号、上下文特征累加分数。
+    2. 扣除安静局面惩罚、预算耗尽惩罚、冷却惩罚。
+    3. 将总分与分级阈值比较，再通过概率门控最终决定等级。
+
+    Level 含义：
+        0 — 不 probe，直接使用静态评估（快速路径）。
+        1 — 轻量 probe（depth=1, QS depth=2, 无将军延伸）。
+        2 — 标准 probe（depth=2~4, QS depth=4, 含将军延伸）。
+
+    Returns:
+        0, 1, 或 2。
+    """
+    cp = board.current_player
+    opp = "black" if cp == "red" else "red"
+    is_cp_in_check = Rules.is_king_in_check(board, cp)
+    is_opp_in_check = Rules.is_king_in_check(board, opp)
+
+    # ── 1. 子力阶段基础分 ──
+    score = 0
+    if piece_count <= 10:
+        score += _SCORE_DEEP_ENDGAME
+    elif piece_count <= _ENDGAME_PIECE_THRESHOLD:
+        score += _SCORE_EARLY_ENDGAME
+    elif piece_count <= 20:
+        score += _SCORE_LATE_MIDGAME
+
+    # ── 2. 战术信号加分 ──
+    if is_cp_in_check:
+        score += _SCORE_IN_CHECK
+    if is_opp_in_check:
+        score += _SCORE_OPP_IN_CHECK
+    if is_last_capture:
+        score += _SCORE_LAST_CAPTURE
+    if node_visits >= _HIGH_VISIT_THRESHOLD:
+        score += _SCORE_HIGH_VISITS
+
+    # ── 3. 安静局面惩罚（仅残局阶段计算，避免中局白耗开销） ──
+    if not is_cp_in_check and not is_opp_in_check:
+        if piece_count <= _ENDGAME_PIECE_THRESHOLD and _is_quiet_endgame(board):
+            score -= _QUIET_SCORE_PENALTY
+
+    # ── 4. 预算惩罚（硬约束：耗尽后几乎必定 Level 0） ──
+    if budget.is_any_exhausted:
+        score -= _BUDGET_EXHAUSTED_PENALTY
+    # ── 5. 冷却惩罚（软约束：间隔不足时降低触发倾向） ──
+    elif budget.is_cooldown_active(sims_done):
+        score -= _COOLDOWN_PENALTY
+
+    # ── 6. 分级 + 概率门控 ──
+    if score >= _PROBE_SCORE_THRESHOLD_FULL:
+        if random.random() < _PROBE_PROB_FULL:
+            return 2
+        return 0
+    if score >= _PROBE_SCORE_THRESHOLD_LIGHT:
+        if random.random() < _PROBE_PROB_LIGHT:
+            return 1
+        return 0
+    return 0
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -531,15 +727,23 @@ def _find_king_capture(
 
 def _pick_rollout_move_fast(
     sim_board: Board, moves: List[Move4], b_grid,
-) -> Move4:
-    """零校验启发式走子：80% 概率吃子优先。"""
+) -> Tuple[Move4, bool]:
+    """零校验启发式走子：80% 概率吃子优先。
+
+    Returns:
+        ``(chosen_move, is_capture)`` 二元组。``is_capture`` 用于
+        rollout 结束后传递给 probe 触发判定——"末步为吃子"是战术
+        转换点的重要信号。
+    """
     captures = [m for m in moves if b_grid[m[2]][m[3]] is not None]
     if captures and random.random() < _CAPTURE_PROB:
         m = random.choice(captures)
+        is_capture = True
     else:
         m = random.choice(moves)
+        is_capture = b_grid[m[2]][m[3]] is not None
     sim_board.apply_move(*m)
-    return m
+    return m, is_capture
 
 
 def _eval_to_winrate(board: Board, root_player: str) -> float:
@@ -593,17 +797,26 @@ def _simulate_or_probe(
     board: Board,
     root_player: str,
     probe_state: dict,
+    sims_done: int,
+    node_visits: int = 0,
 ) -> Tuple[float, Set[Move4], Set[Move4]]:
-    """轻量级伪合法 rollout + 选择性 minimax probe。
+    """轻量级伪合法 rollout + 分级选择性 minimax probe。
 
     与 ``mcts.py`` 的 ``_simulate()`` 流程一致，区别在于 rollout 截断后：
-    若局面满足战术条件，用 ``_probe_negamax()`` 替代纯静态评估。
+    调用 ``_compute_probe_level()`` 做多因子评分判定，返回三级策略：
+
+    - **Level 0** — 不 probe，直接静态评估（快速路径）。
+    - **Level 1** — 轻量 probe（depth 1, QS depth 2, 无将军延伸）。
+    - **Level 2** — 标准 probe（depth 2~4, QS depth 4, 含将军延伸）。
+
+    probe 触发受 ``ProbeBudget`` 的调用次数上限、节点上限和冷却间隔约束。
     """
     sim_board = board.copy()
     b_grid = sim_board.board
     rollout_limit = _dynamic_rollout_limit(sim_board.piece_count())
     red_moves: Set[Move4] = set()
     black_moves: Set[Move4] = set()
+    is_last_capture = False
 
     for _ in range(rollout_limit):
         cp = sim_board.current_player
@@ -630,25 +843,55 @@ def _simulate_or_probe(
                     black_moves.add(king_cap)
                 return (1.0 if cp == root_player else 0.0), red_moves, black_moves
 
-        chosen = _pick_rollout_move_fast(sim_board, moves, b_grid)
+        chosen, is_last_capture = _pick_rollout_move_fast(sim_board, moves, b_grid)
         if cp == "red":
             red_moves.add(chosen)
         else:
             black_moves.add(chosen)
 
-    # ── Rollout 截断：选择性 probe 或快速静态评估 ──
+    # ── Rollout 截断：多因子评分 → 分级 probe 或快速静态评估 ──
     current_pc = sim_board.piece_count()
-    if _should_use_probe(sim_board, current_pc):
+    budget: ProbeBudget = probe_state["budget"]
+
+    probe_level = _compute_probe_level(
+        sim_board, current_pc, budget, sims_done,
+        is_last_capture=is_last_capture,
+        node_visits=node_visits,
+    )
+
+    if probe_level == 2:
+        # ── Level 2: 标准 probe ──
         is_in_check = Rules.is_king_in_check(sim_board, sim_board.current_player)
         depth = _probe_depth_for_position(current_pc, is_in_check)
+        nodes_before = probe_state["nodes"]
         probe_state["probes"] += 1
         raw = _probe_negamax(
             sim_board, depth, float("-inf"), float("inf"), probe_state,
+            check_ext_left=_PROBE_MAX_CHECK_EXT,
+            qs_depth_limit=_PROBE_QS_DEPTH_LIMIT,
         )
+        budget.record_probe(sims_done, probe_state["nodes"] - nodes_before)
         if sim_board.current_player != root_player:
             raw = -raw
         result = 1.0 / (1.0 + math.exp(-raw / _SCORE_SCALE))
+
+    elif probe_level == 1:
+        # ── Level 1: 轻量 probe（浅搜索 + 浅 QS + 无将军延伸） ──
+        nodes_before = probe_state["nodes"]
+        probe_state["probes"] += 1
+        raw = _probe_negamax(
+            sim_board, _LIGHT_PROBE_DEPTH, float("-inf"), float("inf"),
+            probe_state,
+            check_ext_left=0,
+            qs_depth_limit=_LIGHT_PROBE_QS_DEPTH,
+        )
+        budget.record_probe(sims_done, probe_state["nodes"] - nodes_before)
+        if sim_board.current_player != root_player:
+            raw = -raw
+        result = 1.0 / (1.0 + math.exp(-raw / _SCORE_SCALE))
+
     else:
+        # ── Level 0: 快速路径——纯静态评估 ──
         result = _eval_to_winrate(sim_board, root_player)
 
     return result, red_moves, black_moves
@@ -684,13 +927,21 @@ def _expand_one(
 def _merge_child_stats(
     results: list,
 ) -> Tuple[Dict[Move4, Dict[str, float]], Dict[str, int]]:
-    """合并多棵树的根子节点统计 + probe 统计。"""
+    """合并多棵树的根子节点统计 + probe 统计（含预算使用量）。"""
     merged: Dict[Move4, Dict[str, float]] = {}
     total_probes = 0
     total_probe_nodes = 0
+    total_budget_calls = 0
+    total_budget_calls_max = 0
+    total_budget_nodes = 0
+    total_budget_nodes_max = 0
     for child_stats, p_stats in results:
         total_probes += p_stats.get("probes", 0)
         total_probe_nodes += p_stats.get("probe_nodes", 0)
+        total_budget_calls += p_stats.get("budget_calls_used", 0)
+        total_budget_calls_max += p_stats.get("budget_calls_max", 0)
+        total_budget_nodes += p_stats.get("budget_nodes_used", 0)
+        total_budget_nodes_max += p_stats.get("budget_nodes_max", 0)
         for mv, st in child_stats.items():
             if mv in merged:
                 merged[mv]["visits"] += st["visits"]
@@ -704,7 +955,14 @@ def _merge_child_stats(
                     "rave_visits": st["rave_visits"],
                     "rave_wins": st["rave_wins"],
                 }
-    return merged, {"probes": total_probes, "probe_nodes": total_probe_nodes}
+    return merged, {
+        "probes": total_probes,
+        "probe_nodes": total_probe_nodes,
+        "budget_calls_used": total_budget_calls,
+        "budget_calls_max": total_budget_calls_max,
+        "budget_nodes_used": total_budget_nodes,
+        "budget_nodes_max": total_budget_nodes_max,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -729,6 +987,9 @@ def _run_single_hybrid_tree(
     random.seed(time.time_ns() + seed_offset)
     t0 = time.time()
 
+    # 初始化 per-tree probe 预算（调用次数 + 节点数双重上限）
+    budget = ProbeBudget(max_simulations)
+
     # 初始化 per-tree probe 状态（所有模拟共享，多进程天然隔离）
     probe_state: dict = {
         "tt": {},
@@ -736,6 +997,7 @@ def _run_single_hybrid_tree(
         "history": {},
         "nodes": 0,
         "probes": 0,
+        "budget": budget,
     }
 
     root_player = board.current_player
@@ -785,6 +1047,8 @@ def _run_single_hybrid_tree(
             # ── Simulation / Probe ──
             sim_result, red_moves, black_moves = _simulate_or_probe(
                 board, root_player, probe_state,
+                sims_done=sims_done,
+                node_visits=node.visits,
             )
 
         # ── Backpropagation ──
@@ -808,6 +1072,10 @@ def _run_single_hybrid_tree(
     probe_stats = {
         "probes": probe_state["probes"],
         "probe_nodes": probe_state["nodes"],
+        "budget_calls_used": budget.probe_calls,
+        "budget_calls_max": budget.max_probe_calls,
+        "budget_nodes_used": budget.probe_nodes,
+        "budget_nodes_max": budget.max_probe_nodes,
     }
     return child_stats, probe_stats
 
@@ -927,15 +1195,23 @@ class MCTSMinimaxAI:
             "win_rate": f"{best_wr * 100:.1f}%",
             "probe_count": probe_stats.get("probes", 0),
             "probe_nodes": probe_stats.get("probe_nodes", 0),
+            "budget_calls_used": probe_stats.get("budget_calls_used", 0),
+            "budget_calls_max": probe_stats.get("budget_calls_max", 0),
+            "budget_nodes_used": probe_stats.get("budget_nodes_used", 0),
+            "budget_nodes_max": probe_stats.get("budget_nodes_max", 0),
         }
         if self.verbose:
             print(
                 f"[Hybrid] 搜索完成: {total_sims} sims, "
                 f"{effective_workers} workers, {elapsed:.3f}s"
             )
+            pc = probe_stats.get("probes", 0)
+            pn = probe_stats.get("probe_nodes", 0)
+            bc = probe_stats.get("budget_calls_used", 0)
+            bm = probe_stats.get("budget_calls_max", 0)
             print(
-                f"[Hybrid] Probe 触发: {probe_stats.get('probes', 0)} 次, "
-                f"Probe 节点: {probe_stats.get('probe_nodes', 0)}"
+                f"[Hybrid] Probe: {pc} 次 ({pn} nodes), "
+                f"预算: {bc}/{bm} calls"
             )
             if best_move is not None:
                 print(f"[Hybrid] 最佳走法: {best_move}  胜率: {best_wr:.1%}")
