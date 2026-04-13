@@ -51,12 +51,21 @@ from chinese_chess.model.rules import Rules
 
 from .evaluation import Evaluation
 from .opening_book import OPENING_BOOK, mirror_move
+from .mcts import (
+    _policy_attack_bias,
+    _order_untried_moves_policy,
+    _pick_rollout_move_fast,
+    _move_gives_check,
+    _is_aggressive_push,
+    _POLICY_HVCAP_VALUE,
+    _ROOT_BIAS_SCALE,
+    _ROOT_VISITS_TIE_FRAC,
+)
 
 # ═══════════════════════════════════════════════════════════════
 #  MCTS 常量（沿用 mcts.py）
 # ═══════════════════════════════════════════════════════════════
 
-_CAPTURE_PROB = 0.80    # 模拟阶段"吃子优先"概率
 _UCB_C = 1.414          # UCB1 探索常数 c ≈ √2
 _SCORE_SCALE = 600.0    # 评估分 → sigmoid 胜率的缩放因子
 _RAVE_CONST = 300       # RAVE 等效常数 k：β 衰减速度
@@ -117,6 +126,11 @@ _PROBE_PROB_FULL = 0.80    # Level 2 触发概率
 
 # ── 冷却 ──
 _PROBE_COOLDOWN_SIMS = 5   # 两次 probe 之间最少间隔模拟数
+
+# ── Policy：probe 触发 / 排序 轻量进攻偏置（不加到 Evaluation 分值上）──
+_SCORE_POLICY_PRESSURE = 2   # 存在将军着法或高价值吃子机会时加分
+_PROBE_ATTACK_BONUS_CHECK = 130
+_PROBE_ATTACK_BONUS_AGGRESSIVE = 48
 
 # ── per-tree 预算 ──
 _MAX_PROBE_RATIO = 0.25           # probe 次数上限 = max_sims × ratio
@@ -244,7 +258,7 @@ class HybridNode:
             self.untried_moves = list(
                 Rules.get_pseudo_legal_moves(board, board.current_player)
             )
-            random.shuffle(self.untried_moves)
+            _order_untried_moves_policy(board, self.untried_moves)
 
     def is_fully_expanded(self) -> bool:
         return self.untried_moves is not None and len(self.untried_moves) == 0
@@ -344,6 +358,8 @@ def _probe_order_moves(
 
     b = board.board
 
+    mover = board.current_player
+
     def score(m: Move4) -> int:
         if tt_best_move is not None and m == tt_best_move:
             return 1_000_000
@@ -362,6 +378,11 @@ def _probe_order_moves(
             s += 5000
         elif m == k1:
             s += 4000
+        if tt_best_move is None or m != tt_best_move:
+            if _move_gives_check(board, m, mover):
+                s += _PROBE_ATTACK_BONUS_CHECK
+            elif victim is None and _is_aggressive_push(board, mover, m, b):
+                s += _PROBE_ATTACK_BONUS_AGGRESSIVE
         return s
 
     moves.sort(key=score, reverse=True)
@@ -637,6 +658,13 @@ def _compute_probe_level(
     elif budget.is_cooldown_active(sims_done):
         score -= _COOLDOWN_PENALTY
 
+    # ── 5b. 战术压力（将军机会 / 高价值吃子机会）→ 提高 probe 倾向，不改静态评估 ──
+    pressure = _tactical_pressure_bonus(board)
+    if pressure >= 2:
+        score += _SCORE_POLICY_PRESSURE
+    elif pressure == 1:
+        score += max(1, _SCORE_POLICY_PRESSURE // 2)
+
     # ── 6. 分级 + 概率门控 ──
     if score >= _PROBE_SCORE_THRESHOLD_FULL:
         if random.random() < _PROBE_PROB_FULL:
@@ -654,24 +682,19 @@ def _compute_probe_level(
 # ═══════════════════════════════════════════════════════════════
 
 
-def _order_root_moves(board: Board, moves: List[Move4]) -> None:
-    """根节点 untried_moves 启发排序：MVV-LVA 高分排末尾（pop 优先展开）。"""
-    if not moves:
-        return
+def _tactical_pressure_bonus(board: Board) -> int:
+    """O(伪合法着法数)：是否存在将军着法或高价值吃子（仅用于 probe 触发评分）。"""
+    cp = board.current_player
     b = board.board
     pv = Evaluation.PIECE_VALUES
-
-    def score(m: Move4) -> int:
-        sr, sc, er, ec = m
-        victim = b[er][ec]
-        if victim is not None:
-            attacker = b[sr][sc]
-            vv = int(pv.get(victim.piece_type, 0))
-            av = int(pv.get(attacker.piece_type, 0)) if attacker else 0
-            return 10000 + vv - av
-        return 0
-
-    moves.sort(key=score)  # 升序：最差在前，最佳在尾（pop 弹出）
+    hi_cap = False
+    for m in Rules.get_pseudo_legal_moves(board, cp):
+        if _move_gives_check(board, m, cp):
+            return 2
+        vic = b[m[2]][m[3]]
+        if vic is not None and pv.get(vic.piece_type, 0) >= _POLICY_HVCAP_VALUE:
+            hi_cap = True
+    return 1 if hi_cap else 0
 
 
 def _find_king_capture(
@@ -723,27 +746,6 @@ def _find_king_capture(
                     return (r, c, tkr, tkc)
 
     return None
-
-
-def _pick_rollout_move_fast(
-    sim_board: Board, moves: List[Move4], b_grid,
-) -> Tuple[Move4, bool]:
-    """零校验启发式走子：80% 概率吃子优先。
-
-    Returns:
-        ``(chosen_move, is_capture)`` 二元组。``is_capture`` 用于
-        rollout 结束后传递给 probe 触发判定——"末步为吃子"是战术
-        转换点的重要信号。
-    """
-    captures = [m for m in moves if b_grid[m[2]][m[3]] is not None]
-    if captures and random.random() < _CAPTURE_PROB:
-        m = random.choice(captures)
-        is_capture = True
-    else:
-        m = random.choice(moves)
-        is_capture = b_grid[m[2]][m[3]] is not None
-    sim_board.apply_move(*m)
-    return m, is_capture
 
 
 def _eval_to_winrate(board: Board, root_player: str) -> float:
@@ -843,7 +845,9 @@ def _simulate_or_probe(
                     black_moves.add(king_cap)
                 return (1.0 if cp == root_player else 0.0), red_moves, black_moves
 
-        chosen, is_last_capture = _pick_rollout_move_fast(sim_board, moves, b_grid)
+        chosen, is_last_capture = _pick_rollout_move_fast(
+            sim_board, moves, b_grid,
+        )
         if cp == "red":
             red_moves.add(chosen)
         else:
@@ -1004,9 +1008,6 @@ def _run_single_hybrid_tree(
     opp_of_root = "black" if root_player == "red" else "red"
     root = HybridNode(state_hash=board.zobrist_hash, player_just_moved=opp_of_root)
     root.ensure_moves(board)
-
-    # 根着法启发排序：吃子优先展开（最佳排末尾供 pop 弹出）
-    _order_root_moves(board, root.untried_moves)
 
     tt: Dict[int, HybridNode] = {root.state_hash: root}
     move_stack: List[Tuple[Move4, Any]] = []
@@ -1184,16 +1185,24 @@ class MCTSMinimaxAI:
         elapsed = time.time() - t0
         self.simulations_run = total_sims
 
-        # 选择访问次数最多的走法
+        root_player = board.current_player
+        v_max = max((int(st["visits"]) for st in child_stats.values()), default=0)
         best_move: Optional[Move4] = None
+        best_key = -1.0
         best_visits = -1
         best_wr = 0.0
         for mv, st in child_stats.items():
             v = int(st["visits"])
-            if v > best_visits:
-                best_visits = v
+            w = float(st["wins"])
+            wr = w / v if v > 0 else 0.0
+            bias = _policy_attack_bias(board, root_player, mv)
+            close = min(1.0, v / max(v_max * _ROOT_VISITS_TIE_FRAC, 1e-6))
+            key = v * 1_000_000.0 + w * 1_000.0 + bias * _ROOT_BIAS_SCALE * close
+            if key > best_key:
+                best_key = key
                 best_move = mv
-                best_wr = st["wins"] / v if v > 0 else 0.0
+                best_visits = v
+                best_wr = wr
 
         probe_n = int(probe_stats.get("probe_nodes", 0))
         self.last_stats = {

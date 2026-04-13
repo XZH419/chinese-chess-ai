@@ -50,14 +50,109 @@ from .opening_book import OPENING_BOOK, mirror_move
 
 # ── 模块级常量 ──
 
-_CAPTURE_PROB = 0.80    # 模拟阶段"吃子优先"的概率阈值（80% 选吃子，20% 随机）
 _UCB_C = 1.414          # UCB1 探索常数 c ≈ √2，平衡利用与探索
 _SCORE_SCALE = 600.0    # Evaluation 原始分 → sigmoid 胜率的缩放因子
 _RAVE_CONST = 300       # RAVE 等效常数 k：β = rave_visits / (rave_visits + visits + k)，
                         # k 越大 → RAVE 权重衰减越快 → 越快回归纯 MCTS
 
+# ── Policy 层进攻偏置（不调用 Evaluation.evaluate，不重算静态分值）──
+_POLICY_HVCAP_VALUE = 300   # 高价值吃子阈值（马/炮/车，沿用 MG 子力刻度）
+_ROOT_BIAS_SCALE = 55.0     # 根决策 tie-break：bias 权重（相对 visits×1e6+wins×1e3 很小）
+_ROOT_VISITS_TIE_FRAC = 0.88  # 与最高 visits 的比 ≥ 此值才吃满 attack bias
+_ROLL_PREFER_CHECK = 0.52
+_ROLL_PREFER_HVCAP = 0.55
+_ROLL_PREFER_ANY_CAPTURE = 0.70
+_ROLL_PREFER_AGGRESSIVE = 0.36
+
 # 走法四元组：(起始行, 起始列, 目标行, 目标列)
 Move4 = Tuple[int, int, int, int]
+
+
+def _move_gives_check(board: Board, move: Move4, mover: str) -> bool:
+    """走法是否对对方将军（apply/undo，非法则 False）。"""
+    captured = board.apply_move(*move)
+    try:
+        if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
+            return False
+        return Rules.is_king_in_check(board, board.current_player)
+    finally:
+        board.undo_move(*move, captured)
+
+
+def _is_aggressive_push(board: Board, mover: str, m: Move4, b_grid) -> bool:
+    """轻量「攻击性推进」：过河兵/卒纵向前进，或大子深入敌阵（非吃子）。"""
+    sr, sc, er, ec = m
+    piece = b_grid[sr][sc]
+    if piece is None or b_grid[er][ec] is not None:
+        return False
+    pt = piece.piece_type
+    if pt == "bing":
+        if mover == "red":
+            return er < sr or (er == sr and abs(ec - sc) == 1 and sr <= 4)
+        return er > sr or (er == sr and abs(ec - sc) == 1 and sr >= 5)
+    if mover == "red" and er <= 4:
+        return pt in ("che", "ma", "pao")
+    if mover == "black" and er >= 5:
+        return pt in ("che", "ma", "pao")
+    return False
+
+
+def _is_forcing_move(board: Board, mover: str, m: Move4, b_grid) -> bool:
+    """将军或吃子（不含完整局面评估）。"""
+    if b_grid[m[2]][m[3]] is not None:
+        return True
+    return _move_gives_check(board, m, mover)
+
+
+def _policy_attack_bias(board: Board, mover: str, m: Move4) -> float:
+    """根节点 tie-break 用轻量偏置，约 0~1.5，仅供 policy，不写入静态值。"""
+    b = board.board
+    pv = Evaluation.PIECE_VALUES
+    bias = 0.0
+    victim = b[m[2]][m[3]]
+    if victim is not None and victim.piece_type != "jiang":
+        bias += min(1.0, float(pv.get(victim.piece_type, 0)) / 900.0)
+    if victim is None or victim.piece_type != "jiang":
+        if _move_gives_check(board, m, mover):
+            bias += 0.35
+    if _is_aggressive_push(board, mover, m, b):
+        bias += 0.12
+    return bias
+
+
+def _order_untried_moves_policy(board: Board, moves: List[Move4]) -> None:
+    """展开顺序：低优先在前、高优先在尾（pop 先展高优先）；组内随机。"""
+    if not moves:
+        return
+    mover = board.current_player
+    b = board.board
+    pv = Evaluation.PIECE_VALUES
+    tier_rest: List[Move4] = []
+    tier_agg: List[Move4] = []
+    tier_cap: List[Move4] = []
+    tier_hvcap: List[Move4] = []
+    tier_check: List[Move4] = []
+    for m in moves:
+        victim = b[m[2]][m[3]]
+        if victim is not None and victim.piece_type == "jiang":
+            tier_check.append(m)
+            continue
+        if _move_gives_check(board, m, mover):
+            tier_check.append(m)
+            continue
+        if victim is not None:
+            if pv.get(victim.piece_type, 0) >= _POLICY_HVCAP_VALUE:
+                tier_hvcap.append(m)
+            else:
+                tier_cap.append(m)
+            continue
+        if _is_aggressive_push(board, mover, m, b):
+            tier_agg.append(m)
+        else:
+            tier_rest.append(m)
+    for bucket in (tier_rest, tier_agg, tier_cap, tier_hvcap, tier_check):
+        random.shuffle(bucket)
+    moves[:] = tier_rest + tier_agg + tier_cap + tier_hvcap + tier_check
 
 
 def _dynamic_rollout_limit(piece_count: int) -> int:
@@ -152,7 +247,7 @@ class MCTSNode:
             self.untried_moves = list(
                 Rules.get_pseudo_legal_moves(board, board.current_player)
             )
-            random.shuffle(self.untried_moves)
+            _order_untried_moves_policy(board, self.untried_moves)
 
     def is_fully_expanded(self) -> bool:
         """判断该节点是否已完全展开（所有候选走法都已尝试过）。
@@ -400,7 +495,7 @@ def _simulate(
        若是，说明上一步行棋方未解将或主动送将，当前行棋方可"吃将"获胜。
     2. **一击必杀**：生成伪合法走法后，先扫描对方老将坐标是否可直达；
        若有可直接吃将的着法，立即执行并判胜。
-    3. **启发式走子**：以 80% 概率优先选择吃子走法（Heavy Playout），
+    3. **启发式走子**：分级 forcing-first（将杀 / 将军 / 高价值吃子 / …），
        不做自将 / 白脸将检查。非法状态由下一步的"被吃将"检测兜底。
 
     同时记录双方尝试过的着法集合，供 RAVE 反向传播使用。
@@ -447,9 +542,8 @@ def _simulate(
                     black_moves.add(king_cap)
                 return (1.0 if cp == root_player else 0.0), red_moves, black_moves
 
-        # 启发式随机走子：吃子优先（Heavy Playout），不做合法性校验，
-        # 非法状态由下一步的 O(1) 终局检测兜底
-        chosen = _pick_rollout_move_fast(sim_board, moves, b_grid)
+        # 启发式走子：policy 层 forcing-first，非法由下一步 O(1) 终局检测兜底
+        chosen, _ = _pick_rollout_move_fast(sim_board, moves, b_grid)
         if cp == "red":
             red_moves.add(chosen)
         else:
@@ -535,31 +629,51 @@ def _pick_rollout_move_fast(
     sim_board: Board,
     moves: List[Move4],
     b_grid,
-) -> Move4:
-    """零校验启发式走子（模拟阶段专用）。
+) -> Tuple[Move4, bool]:
+    """分级 forcing-first rollout：将 / 将军 / 高价值吃子 / 吃子 / 推进 / 随机。
 
-    以 80% 概率优先选择吃子走法（Heavy Playout 策略），以加速达到终局状态
-    并提高模拟结果的参考价值；剩余 20% 概率随机走普通走法以保持探索性。
-
-    **不做任何合法性检查**（不校验自将、白脸将等），非法状态由下一步的
-    O(1) 终局检测兜底。使用 ``random.choice`` 而非 ``random.shuffle``，
-    将走法选择开销从 O(n) 降低到 O(1)。
-
-    Args:
-        sim_board: 模拟用棋盘副本（会被直接 apply_move 修改）。
-        moves: 当前所有伪合法走法列表。
-        b_grid: ``sim_board.board`` 二维数组引用。
-
-    Returns:
-        被选中并执行的走法四元组（已 apply_move 到 sim_board 上）。
+    不调用 ``Evaluation.evaluate``；吃子价值仅用 ``Evaluation.PIECE_VALUES``。
+    返回 ``(move, 是否为吃子)``，后者供 hybrid 侧 probe 触发等逻辑使用。
     """
-    captures = [m for m in moves if b_grid[m[2]][m[3]] is not None]
-    if captures and random.random() < _CAPTURE_PROB:
-        m = random.choice(captures)
-    else:
-        m = random.choice(moves)
-    sim_board.apply_move(*m)
-    return m
+    cp = sim_board.current_player
+    pv = Evaluation.PIECE_VALUES
+    checking: List[Move4] = []
+    hv_caps: List[Move4] = []
+    lv_caps: List[Move4] = []
+    aggressive: List[Move4] = []
+
+    for m in moves:
+        victim = b_grid[m[2]][m[3]]
+        if victim is not None and victim.piece_type == "jiang":
+            was_cap = True
+            sim_board.apply_move(*m)
+            return m, was_cap
+        if _move_gives_check(sim_board, m, cp):
+            checking.append(m)
+            continue
+        if victim is not None:
+            if pv.get(victim.piece_type, 0) >= _POLICY_HVCAP_VALUE:
+                hv_caps.append(m)
+            else:
+                lv_caps.append(m)
+            continue
+        if _is_aggressive_push(sim_board, cp, m, b_grid):
+            aggressive.append(m)
+
+    m_pick: Optional[Move4] = None
+    if checking and random.random() < _ROLL_PREFER_CHECK:
+        m_pick = random.choice(checking)
+    elif hv_caps and random.random() < _ROLL_PREFER_HVCAP:
+        m_pick = random.choice(hv_caps)
+    elif (hv_caps or lv_caps) and random.random() < _ROLL_PREFER_ANY_CAPTURE:
+        m_pick = random.choice(hv_caps + lv_caps)
+    elif aggressive and random.random() < _ROLL_PREFER_AGGRESSIVE:
+        m_pick = random.choice(aggressive)
+    if m_pick is None:
+        m_pick = random.choice(moves)
+    was_capture = b_grid[m_pick[2]][m_pick[3]] is not None
+    sim_board.apply_move(*m_pick)
+    return m_pick, was_capture
 
 
 def _eval_to_winrate(board: Board, root_player: str) -> float:
@@ -777,16 +891,28 @@ class MCTSAI:
         elapsed = time.time() - t0
         self.simulations_run = total_sims
 
-        # 选择访问次数最多的走法（最稳健策略）
+        # 主键：visits / wins；近优候选上叠加极小 policy_attack_bias（不压过统计）
+        root_player = board.current_player
+        v_max = max((int(st["visits"]) for st in merged.values()), default=0)
         best_move: Optional[Move4] = None
+        best_key = -1.0
         best_visits = -1
         best_wr = 0.0
         for mv, st in merged.items():
             v = int(st["visits"])
-            if v > best_visits:
-                best_visits = v
+            w = float(st["wins"])
+            wr = w / v if v > 0 else 0.0
+            bias = _policy_attack_bias(board, root_player, mv)
+            close = min(
+                1.0,
+                v / max(v_max * _ROOT_VISITS_TIE_FRAC, 1e-6),
+            )
+            key = v * 1_000_000.0 + w * 1_000.0 + bias * _ROOT_BIAS_SCALE * close
+            if key > best_key:
+                best_key = key
                 best_move = mv
-                best_wr = st["wins"] / v if v > 0 else 0.0
+                best_visits = v
+                best_wr = wr
 
         self.last_stats = {
             "time_taken": elapsed,

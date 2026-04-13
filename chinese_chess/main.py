@@ -133,7 +133,16 @@ if __name__ == "__main__":
     controller = GameController(red_agent=red_agent, black_agent=black_agent)
 
     if args.mode == "gui":
-        from PyQt5.QtWidgets import QApplication
+        try:
+            from PyQt5.QtWidgets import QApplication
+        except ModuleNotFoundError:
+            print(
+                "错误：未安装 PyQt5，无法启动图形界面。\n"
+                "请执行:  python -m pip install PyQt5\n"
+                "或从仓库根目录:  python -m pip install -r requirements.txt",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         from chinese_chess.view.qt.main_window import MainWindow
 
         app = QApplication(sys.argv)
