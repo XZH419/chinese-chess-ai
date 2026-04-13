@@ -4,6 +4,10 @@
 动态截断启发模拟（Lightweight Rollout + Evaluation 兜底）、__slots__ 节点内存优化、
 多进程根节点并行（Root Parallelism）、RAVE/AMAF 快速着法价值估计、
 Zobrist 置换表 DAG 合并（同局面共享统计）。
+
+**DAG 边属性设计**：走法 (move) 存储于父节点 ``children`` 字典的**键**中，
+而非子节点自身的属性。这避免了同一节点被多个父节点共享时"幽灵棋"冲突——
+Selection 阶段始终从边（字典键）读取走法进行 ``apply_move``。
 """
 
 from __future__ import annotations
@@ -44,17 +48,17 @@ def _dynamic_rollout_limit(piece_count: int) -> int:
 
 
 class MCTSNode:
-    """MCTS-RAVE 搜索树节点。
+    """MCTS-RAVE DAG 搜索节点。
 
-    ``rave_visits`` / ``rave_wins`` 用于 AMAF (All-Moves-As-First) 快速估值：
-    即使某子节点自身访问次数很少，也可通过模拟阶段出现的同一着法来累积统计，
-    加速收敛。
+    走法 (move) 是**边属性**，存储在父节点 ``children: Dict[Move4, MCTSNode]``
+    的键中，而非节点自身。这使得同一节点可安全地被多个父节点共享（DAG），
+    Selection 阶段通过字典键读取正确的走法，不会出现"幽灵棋"冲突。
+
+    ``rave_visits`` / ``rave_wins`` 用于 AMAF 快速估值。
     """
 
     __slots__ = [
         "state_hash",
-        "parent",
-        "move",
         "children",
         "visits",
         "wins",
@@ -68,13 +72,9 @@ class MCTSNode:
         self,
         state_hash: int,
         player_just_moved: str,
-        parent: Optional[MCTSNode] = None,
-        move: Optional[Move4] = None,
     ):
         self.state_hash = state_hash
-        self.parent = parent
-        self.move = move
-        self.children: List[MCTSNode] = []
+        self.children: Dict[Move4, MCTSNode] = {}
         self.visits: int = 0
         self.wins: float = 0.0
         self.untried_moves: Optional[List[Move4]] = None
@@ -98,21 +98,19 @@ class MCTSNode:
                 and len(self.untried_moves) == 0
                 and len(self.children) == 0)
 
-    def best_child_ucb(self, log_parent: float) -> MCTSNode:
-        """UCB1-RAVE 混合选择。
+    def best_child_ucb(self, log_parent: float) -> Tuple[Move4, 'MCTSNode']:
+        """UCB1-RAVE 混合选择，返回 ``(edge_move, child_node)``。
 
-        混合公式：score = (1 - β) * mcts_val + β * rave_val + exploration
-        其中 β = rave_visits / (rave_visits + visits + RAVE_CONST)，
-        随节点访问量增大而衰减至 0（回归纯 MCTS）。
+        走法从字典键（边属性）读取，确保多父节点 DAG 下不会取到错误的走法。
         """
-        best: Optional[MCTSNode] = None
+        best_move: Optional[Move4] = None
+        best_node: Optional[MCTSNode] = None
         best_score = -1.0
-        for ch in self.children:
+        for move, ch in self.children.items():
             rv = ch.rave_visits
             v = ch.visits
-            total = v + rv
-            if total == 0:
-                return ch
+            if v + rv == 0:
+                return move, ch
 
             mcts_val = ch.wins / v if v > 0 else 0.0
             rave_val = ch.rave_wins / rv if rv > 0 else 0.0
@@ -122,15 +120,10 @@ class MCTSNode:
             s = exploit + explore
             if s > best_score:
                 best_score = s
-                best = ch
-        assert best is not None
-        return best
-
-    def best_child_robust(self) -> Optional[MCTSNode]:
-        """搜索结束后选择访问次数最多的子节点（最稳健策略）。"""
-        if not self.children:
-            return None
-        return max(self.children, key=lambda ch: ch.visits)
+                best_move = move
+                best_node = ch
+        assert best_move is not None and best_node is not None
+        return best_move, best_node
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -146,10 +139,9 @@ def _run_single_mcts_tree(
 ) -> Dict[Move4, Dict[str, float]]:
     """在独立进程/线程中执行一棵完整的 MCTS-RAVE-DAG 搜索树。
 
-    局部置换表 ``tt`` 将相同 Zobrist 哈希的节点合并为同一实例（DAG），
-    使不同着法序列到达的同一局面共享 visits / wins 统计，加速收敛。
-    因为 ``_backpropagate`` 已改为接收显式 ``path`` 列表，
-    DAG 中"一个节点有多个父节点无法回溯"的经典难题不复存在。
+    走法 (move) 为边属性（父节点 ``children`` 字典键），Selection 阶段
+    通过 ``best_child_ucb`` 同时返回 ``(edge_move, child_node)``，
+    确保 ``board.apply_move`` 使用的走法与当前路径严格一致。
 
     Returns:
         ``{move: {"visits": V, "wins": W, "rave_visits": RV, "rave_wins": RW}}``
@@ -176,29 +168,31 @@ def _run_single_mcts_tree(
         # ── Selection ──
         while node.is_fully_expanded() and node.children:
             log_n = math.log(node.visits) if node.visits > 0 else 0.0
-            node = node.best_child_ucb(log_n)
-            captured = board.apply_move(*node.move)
-            move_stack.append((node.move, captured))
-            path.append(node)
+            edge_move, next_node = node.best_child_ucb(log_n)
+            captured = board.apply_move(*edge_move)
+            move_stack.append((edge_move, captured))
+            path.append(next_node)
+            node = next_node
 
         # ── Expansion ──
         node.ensure_moves(board)
         expanded = False
         if node.untried_moves:
-            child = _expand_one(board, node, move_stack, tt)
-            if child is not None:
+            result = _expand_one(board, node, move_stack, tt)
+            if result is not None:
+                _exp_move, child = result
+                path.append(child)
                 node = child
-                path.append(node)
                 expanded = True
 
         if not expanded and not node.children and node.visits > 0:
-            result, red_moves, black_moves = _terminal_score(board, root_player), set(), set()
+            sim_result, red_moves, black_moves = _terminal_score(board, root_player), set(), set()
         else:
             # ── Simulation ──
-            result, red_moves, black_moves = _simulate(board, root_player)
+            sim_result, red_moves, black_moves = _simulate(board, root_player)
 
         # ── Backpropagation (with RAVE/AMAF) ──
-        _backpropagate(path, result, red_moves, black_moves)
+        _backpropagate(path, sim_result, red_moves, black_moves)
         sims_done += 1
 
         while move_stack:
@@ -206,14 +200,13 @@ def _run_single_mcts_tree(
             board.undo_move(*mv, cap)
 
     child_stats: Dict[Move4, Dict[str, float]] = {}
-    for ch in root.children:
-        if ch.move is not None:
-            child_stats[ch.move] = {
-                "visits": ch.visits,
-                "wins": ch.wins,
-                "rave_visits": ch.rave_visits,
-                "rave_wins": ch.rave_wins,
-            }
+    for move, ch in root.children.items():
+        child_stats[move] = {
+            "visits": ch.visits,
+            "wins": ch.wins,
+            "rave_visits": ch.rave_visits,
+            "rave_wins": ch.rave_wins,
+        }
     return child_stats
 
 
@@ -225,11 +218,11 @@ def _expand_one(
     node: MCTSNode,
     move_stack: List[Tuple[Move4, Any]],
     tt: Dict[int, MCTSNode],
-) -> Optional[MCTSNode]:
-    """从 ``node.untried_moves`` 弹出一个合法走法并创建或复用子节点。
+) -> Optional[Tuple[Move4, MCTSNode]]:
+    """从 ``node.untried_moves`` 弹出一个合法走法并建立边。
 
-    置换表命中时直接复用已有节点（DAG 合并），使不同路径到达的同一局面
-    共享 visits / wins / rave 统计。
+    返回 ``(edge_move, child_node)``；置换表命中时复用已有节点（DAG 合并）。
+    走法存储于 ``node.children[edge_move] = child``（边属性）。
     """
     mover = board.current_player
     while node.untried_moves:
@@ -242,17 +235,15 @@ def _expand_one(
         child_hash = board.zobrist_hash
         existing = tt.get(child_hash)
         if existing is not None:
-            node.children.append(existing)
-            return existing
+            node.children[move] = existing
+            return move, existing
         child = MCTSNode(
             state_hash=child_hash,
             player_just_moved=mover,
-            parent=node,
-            move=move,
         )
         tt[child_hash] = child
-        node.children.append(child)
-        return child
+        node.children[move] = child
+        return move, child
     return None
 
 
@@ -395,8 +386,7 @@ def _backpropagate(
     """反向传播 + AMAF/RAVE 更新。
 
     沿 path（从叶到根）回传 result（每层翻转视角），同时对每个节点的所有已展开
-    子节点做 RAVE 更新：若子节点的 move 出现在对应颜色的模拟着法集合中，
-    则累加该子节点的 rave_visits / rave_wins。
+    子节点做 RAVE 更新：走法从边（字典键）读取，确保 DAG 下 RAVE 匹配正确。
     """
     score = result
     for i in range(len(path) - 1, -1, -1):
@@ -405,14 +395,12 @@ def _backpropagate(
         if node.player_just_moved is not None:
             node.wins += score
 
-        for child in node.children:
-            if child.move is None:
-                continue
+        for move, child in node.children.items():
             pjm = child.player_just_moved
-            if pjm == "red" and child.move in red_moves:
+            if pjm == "red" and move in red_moves:
                 child.rave_visits += 1
                 child.rave_wins += score
-            elif pjm == "black" and child.move in black_moves:
+            elif pjm == "black" and move in black_moves:
                 child.rave_visits += 1
                 child.rave_wins += score
 
@@ -425,7 +413,7 @@ def _backpropagate(
 
 
 class MCTSAI:
-    """中国象棋蒙特卡洛树搜索 AI（支持多进程根节点并行 + RAVE）。
+    """中国象棋蒙特卡洛树搜索 AI（支持多进程根节点并行 + RAVE + DAG）。
 
     对外接口与 ``MinimaxAI`` 一致：``get_best_move`` / ``choose_move``。
 

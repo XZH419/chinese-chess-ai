@@ -796,8 +796,8 @@ class MainWindow(QMainWindow):
         time_str = (
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
         )
-        self.append_log(f"Random AI 随机落子 | 耗时: {time_str}s")
-
+        self.append_log(f"Random AI 随机落子")
+        self.append_log(f"耗时 (秒): {time_str}s")
     def _log_mcts_stats(self, stats: dict) -> None:
         """格式化 MCTS 搜索统计并写入日志（多行，与 Minimax 风格对齐）。"""
         time_taken = stats.get("time_taken", 0)
