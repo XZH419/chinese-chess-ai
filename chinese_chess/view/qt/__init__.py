@@ -1,7 +1,6 @@
-"""PyQt-based GUI implementation.
+"""基于 PyQt5 的图形界面实现。
 
-This GUI is intentionally "thin":
-- It never contains move rules or win/lose logic.
-- It delegates all game state transitions to `GameController`.
+本 GUI 遵循"薄视图"原则：
+- 不包含任何走法规则或胜负判定逻辑。
+- 所有棋盘状态变更均委托给 ``GameController`` 处理。
 """
-

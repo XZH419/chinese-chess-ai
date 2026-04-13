@@ -1,10 +1,13 @@
-"""GameController（控制器层）。
+"""游戏控制器模块（MVC 架构中的控制器层）。
 
-目标：把“谁走、是否合法、是否终局、AI 走子”这些流程统一收拢到 Controller，
-让 CLI/GUI 变成薄 View（只负责输入/渲染），从而对齐参考项目的 MVC 结构。
+本模块负责将走子流程、合法性校验、终局判定以及 AI 行棋等核心逻辑
+统一收拢到 GameController 中，使 CLI / GUI 只需承担薄 View 职责
+（仅负责用户输入与界面渲染），从而严格对齐参考项目的 MVC 分层结构。
 
-重要：不在此模块内为任何一方隐式挂载 AI；``red_agent`` / ``black_agent`` 为 ``None`` 即人类，
-须在入口（CLI/GUI）显式构造后传入。
+设计约定:
+    - ``red_agent`` / ``black_agent`` 为 ``None`` 时代表该方由人类操控。
+    - 本模块不会隐式地为任何一方挂载 AI，必须由入口层（CLI / GUI）
+      显式构造 agent 后传入。
 """
 
 from __future__ import annotations
@@ -17,7 +20,17 @@ from chinese_chess.model.rules import MoveEntry, Rules
 
 
 def describe_player_agent(agent: Optional[Any]) -> str:
-    """人类 / Minimax / Random / MCTS 等单侧展示名（不含「红方」前缀）。"""
+    """生成单侧玩家的展示名称（不含"红方"/"黑方"前缀）。
+
+    根据 agent 的类型和关键参数，返回一段简短的可读描述，
+    例如 ``"Minimax, Depth=3"`` 或 ``"MCTS, Sims=5000, Workers=4"``。
+
+    Args:
+        agent: AI 实例，若为 ``None`` 则视为人类玩家。
+
+    Returns:
+        str: 玩家类型的简短描述字符串。
+    """
     if agent is None:
         return "Human"
     cls = type(agent).__name__
@@ -34,7 +47,18 @@ def describe_player_agent(agent: Optional[Any]) -> str:
 
 
 def format_matchup_line(red_agent: Optional[Any], black_agent: Optional[Any]) -> str:
-    """例如：红方 (Human) vs 黑方 (Minimax, Depth=3)"""
+    """格式化红黑双方的对阵描述行。
+
+    生成形如 ``"红方 (Human) vs 黑方 (Minimax, Depth=3)"`` 的完整对阵说明，
+    供 CLI / GUI 显示当前对局配置。
+
+    Args:
+        red_agent: 红方 AI 实例，``None`` 表示人类。
+        black_agent: 黑方 AI 实例，``None`` 表示人类。
+
+    Returns:
+        str: 完整的红黑对阵描述字符串。
+    """
     return (
         f"红方 ({describe_player_agent(red_agent)}) "
         f"vs 黑方 ({describe_player_agent(black_agent)})"
@@ -42,35 +66,84 @@ def format_matchup_line(red_agent: Optional[Any], black_agent: Optional[Any]) ->
 
 
 class AgentProtocol:
-    """AI 接口协议（无需继承，仅做鸭子类型约定）。
+    """AI 代理接口协议（鸭子类型约定，无需强制继承）。
 
-    支持两种方法之一（可选传入 game_history：开局至当前的 zobrist_hash 列表）：
-    - choose_move(board, time_limit=..., game_history=...) -> move | None
-    - get_best_move(board, time_limit=..., game_history=...) -> move | None
+    所有 AI 实现应至少提供以下两个方法之一：
+        - ``choose_move(board, time_limit=..., game_history=...) -> move | None``
+        - ``get_best_move(board, time_limit=..., game_history=...) -> move | None``
+
+    其中 ``game_history`` 为可选参数，传入从开局至当前局面的 Zobrist 哈希列表，
+    用于支持重复局面检测等功能。
     """
 
-    # 这里只用于类型提示，不做强制运行时检查
     def choose_move(self, board: Board, time_limit: Optional[float] = None, **kwargs):  # pragma: no cover
+        """选择最佳走法（接口方法，子类须实现）。
+
+        Args:
+            board: 当前棋盘状态。
+            time_limit: 思考时间上限（秒），``None`` 表示不限。
+            **kwargs: 扩展参数，如 ``game_history``。
+
+        Returns:
+            走法元组 ``(sr, sc, er, ec)``，若无合法走法则返回 ``None``。
+
+        Raises:
+            NotImplementedError: 未被子类覆写时抛出。
+        """
         raise NotImplementedError
 
     def get_best_move(self, board: Board, time_limit: Optional[float] = None, **kwargs):  # pragma: no cover
+        """获取最佳走法（``choose_move`` 的别名接口）。
+
+        Args:
+            board: 当前棋盘状态。
+            time_limit: 思考时间上限（秒），``None`` 表示不限。
+            **kwargs: 扩展参数，如 ``game_history``。
+
+        Returns:
+            走法元组 ``(sr, sc, er, ec)``，若无合法走法则返回 ``None``。
+
+        Raises:
+            NotImplementedError: 未被子类覆写时抛出。
+        """
         raise NotImplementedError
 
 
 @dataclass(slots=True)
 class MoveOutcome:
-    """Result of attempting/applying a move."""
+    """走子操作的结果封装。
+
+    用于统一表达一步走子尝试后的所有可能结果，包括是否成功、
+    失败原因、被吃棋子、是否导致终局以及胜者信息。
+
+    Attributes:
+        ok: 走子是否成功执行。
+        message: 失败时的原因说明，成功时通常为空。
+        captured: 本步吃掉的棋子对象，未吃子则为 ``None``。
+        game_over: 仅当 ``ok=True`` 时有意义——本步执行后局面是否已终局。
+        winner: 终局时的胜者颜色（``'red'`` / ``'black'``），和棋时为 ``None``。
+    """
 
     ok: bool
     message: str = ""
     captured: object = None
-    # 仅当 ok=True 且本步执行后局面已终局时有意义；winner=None 表示和棋（如三次重复）
     game_over: bool = False
     winner: Optional[str] = None
 
 
 class GameController:
-    """Central orchestrator for moves and game status."""
+    """中国象棋游戏控制器——走子流程与对局状态的核心调度器。
+
+    负责管理棋盘状态、走子合法性校验、对局历史记录、终局判定
+    以及 AI 行棋调度等全部核心游戏逻辑。CLI / GUI 通过本控制器
+    的公开接口驱动整个对局流程。
+
+    Attributes:
+        board: 当前棋盘实例。
+        red_agent: 红方 AI 代理，``None`` 表示人类操控。
+        black_agent: 黑方 AI 代理，``None`` 表示人类操控。
+        history: 完整对局历史记录列表。
+    """
 
     def __init__(
         self,
@@ -78,6 +151,13 @@ class GameController:
         red_agent: Optional[Any] = None,
         black_agent: Optional[Any] = None,
     ):
+        """初始化游戏控制器。
+
+        Args:
+            board: 初始棋盘实例，``None`` 则自动创建标准开局棋盘。
+            red_agent: 红方 AI 实例，``None`` 表示人类。
+            black_agent: 黑方 AI 实例，``None`` 表示人类。
+        """
         self.board: Board = board or Board()
         # agent 为 None 表示该方是人类（由 GUI 点击驱动）
         self.red_agent = red_agent
@@ -90,7 +170,17 @@ class GameController:
         ]
 
     def agent_for(self, color: str):
-        """返回指定方的 agent；None 表示人类。必须与 board.current_player 的 'red'/'black' 一致使用。"""
+        """获取指定颜色方的 AI 代理。
+
+        Args:
+            color: 阵营颜色，``'red'`` 或 ``'black'``。
+
+        Returns:
+            对应方的 AI 实例；若该方为人类则返回 ``None``。
+
+        Raises:
+            ValueError: 当 ``color`` 不是 ``'red'`` 或 ``'black'`` 时抛出。
+        """
         if color == "red":
             return self.red_agent
         if color == "black":
@@ -98,7 +188,15 @@ class GameController:
         raise ValueError(f"unknown side: {color!r}")
 
     def can_move(self, move: Tuple[int, int, int, int], player: Optional[str] = None) -> bool:
-        """Check if a move is legal for player on current board."""
+        """检查指定走法在当前局面下是否合法。
+
+        Args:
+            move: 走法四元组 ``(起始行, 起始列, 目标行, 目标列)``。
+            player: 行棋方颜色，``None`` 时使用当前轮次玩家。
+
+        Returns:
+            bool: 走法合法返回 ``True``，否则返回 ``False``。
+        """
         sr, sc, er, ec = move
         ok, _ = Rules.is_valid_move(
             self.board, sr, sc, er, ec,
@@ -107,20 +205,46 @@ class GameController:
         )
         return ok
 
-    # --- Stable interface for Views (GUI/CLI) ---
+    # --- 面向 View 层（GUI / CLI）的稳定接口 ---
     def try_apply_player_move(
         self, move: Tuple[int, int, int, int], player: Optional[str] = None
     ) -> MoveOutcome:
-        """尝试让玩家走一步（失败不会改变棋盘状态）。"""
+        """尝试执行玩家走子（失败时不会改变棋盘状态）。
+
+        本方法是面向 View 层的安全包装，内部委托给 ``apply_move``。
+
+        Args:
+            move: 走法四元组 ``(起始行, 起始列, 目标行, 目标列)``。
+            player: 行棋方颜色，``None`` 时使用当前轮次玩家。
+
+        Returns:
+            MoveOutcome: 走子结果，包含成功/失败状态及附带信息。
+        """
         return self.apply_move(move, player=player)
 
     @property
     def game_history_hashes(self) -> List[int]:
-        """向后兼容属性：从 ``history`` 中提取纯 Zobrist 哈希链（供 AI / 重复判和）。"""
+        """从对局历史中提取纯 Zobrist 哈希链（向后兼容属性）。
+
+        供 AI 搜索和重复局面判定使用。
+
+        Returns:
+            List[int]: 从开局到当前局面的 Zobrist 哈希值列表。
+        """
         return [e.pos_hash for e in self.history]
 
     def apply_move(self, move: Tuple[int, int, int, int], player: Optional[str] = None) -> MoveOutcome:
-        """Apply a move if legal, otherwise return a failure outcome."""
+        """执行走子：合法则应用到棋盘，否则返回失败结果。
+
+        完整流程：合法性校验 → 执行走子 → 记录历史 → 检测终局。
+
+        Args:
+            move: 走法四元组 ``(起始行, 起始列, 目标行, 目标列)``。
+            player: 行棋方颜色，``None`` 时使用当前轮次玩家。
+
+        Returns:
+            MoveOutcome: 走子结果，包含吃子信息、终局状态和胜者。
+        """
         sr, sc, er, ec = move
         ok, reason = Rules.is_valid_move(
             self.board, sr, sc, er, ec,
@@ -145,21 +269,46 @@ class GameController:
         return MoveOutcome(ok=True, captured=captured, game_over=over, winner=win)
 
     def undo_move(self, move: Tuple[int, int, int, int], captured) -> None:
+        """撤销一步走子，恢复棋盘和历史到上一状态。
+
+        Args:
+            move: 需要撤销的走法四元组 ``(起始行, 起始列, 目标行, 目标列)``。
+            captured: 该步走子时被吃掉的棋子对象（用于恢复）。
+        """
         sr, sc, er, ec = move
         self.board.undo_move(sr, sc, er, ec, captured)
         if len(self.history) > 1:
             self.history.pop()
 
     def is_game_over(self) -> bool:
+        """判断当前局面是否已终局。
+
+        Returns:
+            bool: 终局返回 ``True``（含将死、困毙、和棋等情况）。
+        """
         return Rules.is_game_over(self.board, position_history=self.game_history_hashes)
 
 
     def winner(self) -> Optional[str]:
-        """返回胜者颜色字符串：'red'/'black'/None。"""
+        """获取当前对局的胜者。
+
+        Returns:
+            Optional[str]: 胜者颜色字符串 ``'red'`` / ``'black'``，
+            和棋或未终局时返回 ``None``。
+        """
         return Rules.winner(self.board)
 
     def current_result(self) -> dict:
-        """返回当前对局状态摘要（供 GUI 显示）。"""
+        """获取当前对局状态摘要（供 GUI 状态栏显示）。
+
+        Returns:
+            dict: 包含以下键值的状态字典：
+                - ``game_over`` (bool): 是否终局
+                - ``winner`` (Optional[str]): 胜者颜色
+                - ``current_player`` (str): 当前行棋方
+                - ``red_is_human`` (bool): 红方是否为人类
+                - ``black_is_human`` (bool): 黑方是否为人类
+        """
         return {
             "game_over": self.is_game_over(),
             "winner": self.winner(),
@@ -169,27 +318,37 @@ class GameController:
         }
 
     def reset_game(self) -> None:
-        """重置棋盘到初始局面，但**保留**当前 red_agent / black_agent 配置。
+        """重置棋盘到初始局面，但保留当前的 AI 代理配置。
 
         用途：
-        - GUI/Benchmark 反复开新局时不丢失命令行传入的对局模式
-        - AI vs AI / 人机模式都能保持一致
+            - GUI / Benchmark 反复开新局时不丢失命令行传入的对局模式。
+            - AI vs AI / 人机模式均能保持一致的代理绑定。
         """
 
         self.board = Board()
         self.history = [MoveEntry(pos_hash=self.board.zobrist_hash)]
 
     def matchup_line(self) -> str:
-        """当前控制器绑定的红黑对阵说明（供 CLI/GUI 打印）。"""
+        """生成当前控制器绑定的红黑对阵说明字符串。
+
+        供 CLI / GUI 标题栏或日志输出使用。
+
+        Returns:
+            str: 形如 ``"红方 (Human) vs 黑方 (Minimax, Depth=3)"`` 的描述。
+        """
         return format_matchup_line(self.red_agent, self.black_agent)
 
     def maybe_play_ai_turn(self, time_limit: float = 5.0) -> MoveOutcome:
-        """若轮到 AI，则让对应 agent 走一步；否则返回 ok=False。
+        """若当前轮到 AI 行棋，则让对应 agent 走一步；否则返回失败。
 
-        注意：
-        - 本方法是“同步”走一步，适用于 CLI/无头对弈。
-        - GUI 场景下，为避免卡 UI，应使用 QThread 在后台计算 move，
-          再由主线程调用 `apply_move`。
+        本方法是同步阻塞调用，适用于 CLI / 无头对弈场景。
+        GUI 场景下应使用 QThread 在后台计算走法，再由主线程调用 ``apply_move``。
+
+        Args:
+            time_limit: AI 思考时间上限（秒），默认 5.0。
+
+        Returns:
+            MoveOutcome: 走子结果。若轮到人类或对局已结束，返回 ``ok=False``。
         """
         if self.is_game_over():
             return MoveOutcome(ok=False, message="game over")
@@ -208,4 +367,3 @@ class GameController:
             return MoveOutcome(ok=False, message="ai has no legal moves")
 
         return self.apply_move(move, player=self.board.current_player)
-

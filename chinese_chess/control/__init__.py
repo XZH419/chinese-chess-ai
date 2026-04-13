@@ -1,8 +1,7 @@
-"""Controller layer.
+"""控制器层（游戏流程编排）。
 
-This layer orchestrates the game flow:
-- mediates between View and Model
-- triggers AI move selection
-- centralizes win/draw detection
+本层负责：
+- 协调视图层（View）与模型层（Model）之间的交互。
+- 触发 AI 走法计算并回传结果。
+- 集中处理胜负和棋判定逻辑。
 """
-

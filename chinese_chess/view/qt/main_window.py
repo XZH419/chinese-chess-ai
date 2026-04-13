@@ -1,3 +1,15 @@
+"""中国象棋 PyQt5 图形界面主窗口模块。
+
+本模块实现基于 PyQt5 的完整中国象棋 GUI，包含棋盘渲染、棋子动画、
+玩家交互、AI 后台计算以及对局配置面板等功能。
+
+核心组件：
+    - ``AIMoveThread``: AI 走法计算的后台线程，避免阻塞 UI。
+    - ``PixmapPieceItem``: 可动画的棋子图元，支持平滑移动效果。
+    - ``XiangqiBoardView``: 棋盘视图，负责渲染和鼠标交互坐标转换。
+    - ``MainWindow``: 主窗口，管理"配置 → 开始 → 对局 → 结束"的完整生命周期。
+"""
+
 from __future__ import annotations
 
 import os
@@ -38,25 +50,44 @@ Pos = Tuple[int, int]
 
 
 def _assets_dir() -> str:
-    # 统一资源路径：`chinese_chess/resources/img`
+    """获取统一资源图片目录的绝对路径。
+
+    Returns:
+        str: ``chinese_chess/resources/img`` 目录的规范化绝对路径。
+    """
     return os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "..", "resources", "img")
     )
 
 
 def _img(name: str) -> str:
+    """拼接资源图片的完整路径。
+
+    Args:
+        name: 图片文件名（如 ``"board.png"``）。
+
+    Returns:
+        str: 资源图片的完整路径。
+    """
     return os.path.join(_assets_dir(), name)
 
 
 def _piece_code(color: str, piece_type: str) -> str:
-    """Map our model Piece to the reference image naming scheme.
+    """将棋盘模型的棋子信息映射为参考项目的图片命名编码。
 
-    Reference images (from IntelligentChineseChessSystem/res/img):
-    - Red:  rb rj rm rp rs rx rz
-    - Black: bb bj bm bp bs bx bz
+    参考项目（IntelligentChineseChessSystem/res/img）的命名规则：
+        - 红方：rb rj rm rp rs rx rz
+        - 黑方：bb bj bm bp bs bx bz
 
-    The second letter matches the reference project's internal piece char:
-    - b: boss(king), s: advisor, x: elephant, m: horse, j: rook, p: cannon, z: pawn
+    第二个字母对应参考项目内部的棋子字符：
+        b=帅/将, s=仕/士, x=相/象, m=马, j=车, p=炮, z=兵/卒
+
+    Args:
+        color: 棋子颜色，``'red'`` 或 ``'black'``。
+        piece_type: 棋子类型标识符（如 ``'jiang'``, ``'ma'``, ``'che'`` 等）。
+
+    Returns:
+        str: 两字符的图片编码（如 ``'rb'`` 表示红方帅）。
     """
 
     type_to_char = {
@@ -73,7 +104,14 @@ def _piece_code(color: str, piece_type: str) -> str:
 
 
 class AIMoveThread(QThread):
-    """后台线程：计算 AI 的下一步走法（不阻塞 UI）。"""
+    """AI 走法计算后台线程。
+
+    在独立线程中执行 AI 搜索计算，避免阻塞 GUI 主线程。
+    计算完成后通过 ``move_ready`` 信号将结果回传给主线程。
+
+    Signals:
+        move_ready: 计算完成时发射，携带参数 ``(走法|None, 统计信息字典|None, 运行ID)``。
+    """
 
     move_ready = pyqtSignal(object, object, int)  # (Move|None, stats:dict|None, run_id)
 
@@ -86,8 +124,20 @@ class AIMoveThread(QThread):
         run_id: int,
         game_history_hashes: Optional[list] = None,
     ):
+        """初始化 AI 计算线程。
+
+        线程内部仅持有棋盘快照和 AI 实例等纯数据对象，
+        绝不持有任何 UI / Controller 引用，避免跨线程资源竞争。
+
+        Args:
+            ai: AI 代理实例（需实现 ``choose_move`` 或 ``get_best_move``）。
+            board_snapshot: 当前棋盘的深拷贝快照。
+            ai_color: AI 所执颜色（``'red'`` 或 ``'black'``）。
+            time_limit_s: 思考时间上限（秒）。
+            run_id: 本次计算的唯一标识，用于主线程过滤过期信号。
+            game_history_hashes: 从开局至今的 Zobrist 哈希列表，用于重复局面检测。
+        """
         super().__init__()
-        # 线程中绝对不持有任何 UI / controller 对象，避免隐式触碰主线程资源
         self._ai = ai
         self._board = board_snapshot
         self._ai_color = ai_color
@@ -96,8 +146,11 @@ class AIMoveThread(QThread):
         self._game_history_hashes = list(game_history_hashes) if game_history_hashes else []
 
     def run(self) -> None:
-        # 仅在纯数据上计算走法：board_snapshot / ai
-        # 注意：AI 计算不应该触碰任何 Qt 对象
+        """线程执行体：在纯数据上计算走法，不触碰任何 Qt 对象。
+
+        计算完成后通过 ``move_ready`` 信号发射结果；
+        若发生异常，将错误信息封装在 stats 字典中一并发射。
+        """
         try:
             if hasattr(self._ai, "choose_move"):
                 self._board.current_player = self._ai_color
@@ -125,55 +178,83 @@ class AIMoveThread(QThread):
 class PixmapPieceItem(QGraphicsObject):
     """可动画的棋子图元。
 
-    关键：QPropertyAnimation 需要 QObject，而 QGraphicsPixmapItem 不是 QObject，
-    所以必须用 QGraphicsObject 来承载 pixmap 并实现 paint/boundingRect。
+    由于 ``QPropertyAnimation`` 需要 ``QObject`` 支撑，而 ``QGraphicsPixmapItem``
+    并非 ``QObject`` 子类，因此使用 ``QGraphicsObject`` 来承载 pixmap 并实现
+    ``paint`` / ``boundingRect``，从而支持平滑的位置动画。
+
+    以图元中心为锚点——``setPos(x, y)`` 直接指定中心点坐标即可。
     """
 
     def __init__(self, pixmap: QPixmap):
+        """初始化棋子图元。
+
+        Args:
+            pixmap: 棋子的位图资源。
+        """
         super().__init__()
         self._pixmap = pixmap
-        # 以"图元中心"为锚点：后续 setPos(x, y) 直接给中心点坐标即可
         self._half_w = self._pixmap.width() / 2.0
         self._half_h = self._pixmap.height() / 2.0
 
     def boundingRect(self):
-        # PyQt5 要求 boundingRect() **必须**返回 QRectF（不能是 QRect）
-        # 同时把包围盒改成"以中心为原点"，与 setPos 的中心点语义保持一致
+        """返回图元的包围矩形（以中心为原点）。
+
+        PyQt5 要求 ``boundingRect()`` 必须返回 ``QRectF``，
+        且包围盒采用"以中心为原点"的坐标系，与 ``setPos`` 的中心点语义保持一致。
+
+        Returns:
+            QRectF: 以中心为原点的包围矩形。
+        """
         return QRectF(-self._half_w, -self._half_h, self._pixmap.width(), self._pixmap.height())
 
     def paint(self, painter: QPainter, option, widget=None):
-        # 以中心为锚点绘制
+        """以中心为锚点绘制棋子位图。
+
+        Args:
+            painter: Qt 绘图器。
+            option: 样式选项（未使用）。
+            widget: 目标窗口部件（未使用）。
+        """
         painter.drawPixmap(int(-self._half_w), int(-self._half_h), self._pixmap)
 
 
 class XiangqiBoardView(QGraphicsView):
-    """对齐参考项目的"贴图棋盘 + 贴图棋子"界面。
+    """中国象棋棋盘视图——贴图棋盘与贴图棋子的渲染层。
 
-    重要约束：
-    - 本类只做渲染与鼠标交互坐标转换
-    - 走子是否合法/胜负判定/AI 决策：全部交给 controller
+    本类严格只负责棋盘图像渲染和鼠标交互坐标转换；
+    走子合法性校验、胜负判定、AI 决策等逻辑全部委托给 Controller。
+
+    坐标映射说明：
+        由于 Swing(JFrame) 与 Qt(QGraphicsView) 的坐标/边距行为不同，
+        "模型坐标 (row, col) ↔ 场景坐标 (x, y)" 的换算参数必须可调。
+
+    Signals:
+        square_clicked: 用户点击棋盘格子时发射，携带 ``(行号, 列号)``。
     """
 
-    # 这些参数用于"模型坐标(row,col) <-> 场景坐标(x,y)"换算。
-    # 由于 Swing(JFrame) 与 Qt(QGraphicsView) 的坐标/边距行为不同，必须可调。
     VIEW_WIDTH = 700
     VIEW_HEIGHT = 712
     PIECE_W = 67
     PIECE_H = 67
 
-    # 强制应用你实测的精准映射数据（渲染/点击必须统一使用）
+    # 实测校准后的精准坐标映射参数（渲染与点击必须统一使用）
     SX_OFFSET = 85
     SX_COE = 67.1
     SY_OFFSET = 42.1
     SY_COE = 68.9
 
-    # 保留可选点击微调（默认 0），你后续若还要细调可以用
+    # 可选的点击微调偏移（默认 0），便于后续精细调整
     CLICK_X_OFFSET = 0.0
     CLICK_Y_OFFSET = 0.0
 
     square_clicked = pyqtSignal(int, int)  # row, col
 
     def __init__(self, controller: GameController):
+        """初始化棋盘视图。
+
+        Args:
+            controller: 游戏控制器实例，用于获取棋盘模型数据。
+        """
         super().__init__()
         self._controller = controller
 
@@ -190,19 +271,36 @@ class XiangqiBoardView(QGraphicsView):
         self.rebuild_from_model()
 
     def _load_background(self) -> None:
+        """加载并显示棋盘背景图片。"""
         board_pix = QPixmap(_img("board.png"))
         bg = QGraphicsPixmapItem(board_pix)
         bg.setZValue(-10)
         self._scene.addItem(bg)
 
     def model_to_view(self, row: int, col: int) -> QPointF:
+        """将棋盘模型坐标转换为场景渲染坐标。
+
+        Args:
+            row: 棋盘行号（0~9）。
+            col: 棋盘列号（0~8）。
+
+        Returns:
+            QPointF: 对应的场景坐标点。
+        """
         x = col * float(self.SX_COE) + float(self.SX_OFFSET)
         y = row * float(self.SY_COE) + float(self.SY_OFFSET)
         return QPointF(x, y)
 
     def view_to_model(self, x: float, y: float) -> Optional[Pos]:
-        # 点击坐标 -> 格子坐标（row,col）
-        # 为便于调试：先做可调偏移，再做"就近吸附"。
+        """将场景坐标转换为棋盘模型坐标（就近吸附到最近格点）。
+
+        Args:
+            x: 场景 X 坐标。
+            y: 场景 Y 坐标。
+
+        Returns:
+            Optional[Pos]: 棋盘格坐标 ``(行号, 列号)``，超出范围则返回 ``None``。
+        """
         x = x + self.CLICK_X_OFFSET
         y = y + self.CLICK_Y_OFFSET
         col = int((x - float(self.SX_OFFSET) + float(self.SX_COE) / 2) / float(self.SX_COE))
@@ -212,23 +310,39 @@ class XiangqiBoardView(QGraphicsView):
         return None
 
     def mousePressEvent(self, event) -> None:
+        """处理鼠标点击事件：将场景坐标转换为棋盘格并发射信号。
+
+        Args:
+            event: Qt 鼠标事件对象。
+        """
         pos = self.mapToScene(event.pos())
         x = pos.x()
         y = pos.y()
         rc = self.view_to_model(x, y)
         if rc is not None:
             row, col = rc
-            # 便于你调试点击错位：打印原始坐标与换算后的格子
             print(f"Mouse Click: x={x}, y={y} -> Board: row={row}, col={col}")
             self.square_clicked.emit(row, col)
         super().mousePressEvent(event)
 
     def piece_item_at(self, row: int, col: int) -> Optional[PixmapPieceItem]:
-        """返回该格子的棋子图元（为空格则返回 None）。"""
+        """获取指定格子上的棋子图元。
+
+        Args:
+            row: 棋盘行号。
+            col: 棋盘列号。
+
+        Returns:
+            Optional[PixmapPieceItem]: 该位置的棋子图元，空格则返回 ``None``。
+        """
         return self._piece_items.get((row, col))
 
     def rebuild_from_model(self) -> None:
-        # Remove existing pieces
+        """根据棋盘模型数据完全重建所有棋子图元。
+
+        清除当前场景中的全部棋子，然后遍历棋盘模型逐一创建新图元。
+        适用于开局、重置或需要完全刷新的场景。
+        """
         for item in list(self._piece_items.values()):
             self._scene.removeItem(item)
         self._piece_items.clear()
@@ -248,40 +362,47 @@ class XiangqiBoardView(QGraphicsView):
                 self._scene.addItem(it)
                 self._piece_items[(r, c)] = it
 
-    # 兼容你希望的命名（语义更清晰）
     def update_all(self) -> None:
+        """刷新全部棋子显示（``rebuild_from_model`` 的语义别名）。"""
         self.rebuild_from_model()
 
     def animate_move(self, move: Move) -> None:
+        """以平滑动画方式执行一步棋子移动。
+
+        动画流程：放大棋子（模拟"拿起"）→ 缓动移动到目标位置 → 恢复原始大小（模拟"落地"）。
+        若目标位置已有棋子（吃子），先将其从场景中移除。
+
+        Args:
+            move: 走法四元组 ``(起始行, 起始列, 目标行, 目标列)``。
+        """
         sr, sc, er, ec = move
         src = (sr, sc)
         dst = (er, ec)
 
         moving_item = self._piece_items.get(src)
-        # If we couldn't resolve the item (shouldn't happen), rebuild.
         if moving_item is None:
             self.rebuild_from_model()
             return
 
-        # Capture: remove any item currently at destination before moving.
+        # 吃子：先移除目标位置上的被吃棋子图元
         captured_item = self._piece_items.get(dst)
         if captured_item is not None and captured_item is not moving_item:
             self._scene.removeItem(captured_item)
             self._piece_items.pop(dst, None)
 
-        # 移动过程中保持放大（像"拿起来"悬浮移动）
+        # 移动过程中放大棋子，模拟"拿起悬浮"效果
         moving_item.setScale(1.2)
 
         anim = QPropertyAnimation(moving_item, b"pos")
         anim.setDuration(160)
-        # 物理缓动：加速启动 -> 减速轻放
+        # 三次缓动曲线：加速启动 → 减速轻放
         anim.setEasingCurve(QEasingCurve.InOutCubic)
         anim.setStartValue(moving_item.pos())
         p = self.model_to_view(er, ec)
         anim.setEndValue(QPointF(p.x(), p.y()))
-        # 非阻塞：start() 只会把动画注册进事件循环，不会卡住主线程
+        # 非阻塞调用：start() 将动画注册进 Qt 事件循环
         anim.start()
-        # 动画结束后缩回，模拟"落地"
+        # 动画结束后恢复原始大小，模拟"落地"
         anim.finished.connect(lambda: moving_item.setScale(1.0))
         moving_item._anim = anim  # type: ignore[attr-defined]
 
@@ -297,14 +418,32 @@ class XiangqiBoardView(QGraphicsView):
 class MainWindow(QMainWindow):
     """中国象棋 GUI 主窗口。
 
-    启动后处于「配置阶段」——用户可在右侧面板选择红/黑双方 AI 类型及参数，
-    点击「开始对局」后进入「对局阶段」，棋盘点击和 AI 自动行棋才被激活。
+    管理从「配置阶段」到「对局阶段」再到「结束/重置」的完整生命周期。
+
+    配置阶段：
+        用户可在右侧面板选择红/黑双方 AI 类型及参数。
+    对局阶段：
+        点击「开始对局」后进入——棋盘点击和 AI 自动行棋被激活。
+    结束/重置：
+        对局自然结束或用户手动结束后回到配置阶段。
+
+    Attributes:
+        controller: 游戏控制器实例。
+        human_color: 当前人类玩家所执颜色。
+        is_game_running: 是否处于对局进行中状态。
     """
 
     _AI_TYPES = ["Human (人类)", "Random (随机)", "Minimax (极大极小)", "MCTS (蒙特卡洛)"]
     _IDX_HUMAN, _IDX_RANDOM, _IDX_MINIMAX, _IDX_MCTS = 0, 1, 2, 3
 
     def __init__(self, controller: Optional[GameController] = None):
+        """初始化主窗口。
+
+        Args:
+            controller: 外部注入的游戏控制器实例。若为 ``None``，
+                则创建默认的人类 vs 人类控制器。若注入的控制器
+                已绑定 AI 代理，窗口将自动同步 UI 配置并开始对局。
+        """
         super().__init__()
 
         self.controller = controller or GameController(red_agent=None, black_agent=None)
@@ -337,23 +476,25 @@ class MainWindow(QMainWindow):
     # ────────────────────── 窗口 / 布局 ──────────────────────
 
     def _init_window(self) -> None:
+        """初始化窗口基本属性（标题、图标）。"""
         self.setWindowTitle("中国象棋")
         icon_path = _img("icon.png")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
     def _init_ui(self) -> None:
+        """构建完整的 UI 布局：左侧棋盘 + 右侧配置/状态/日志面板。"""
         root = QWidget()
         self.setCentralWidget(root)
         main_layout = QHBoxLayout()
         root.setLayout(main_layout)
 
-        # ── 左侧：棋盘 ──
+        # ── 左侧：棋盘视图 ──
         self.board_view = XiangqiBoardView(self.controller)
         self.board_view.square_clicked.connect(self._on_square_clicked)
         main_layout.addWidget(self.board_view, 1)
 
-        # ── 右侧：配置 + 状态 + 日志 ──
+        # ── 右侧：配置 + 状态 + 日志面板 ──
         self.info_panel = QWidget()
         self.info_panel.setMinimumWidth(270)
         right = QVBoxLayout()
@@ -422,7 +563,15 @@ class MainWindow(QMainWindow):
     # ────────────────────── UI 构建辅助 ──────────────────────
 
     def _build_side_group(self, title: str):
-        """构建单侧配置 GroupBox，返回 (group, combo, param_label, param_spin)。"""
+        """构建单侧（红方/黑方）的 AI 配置面板 GroupBox。
+
+        Args:
+            title: 分组标题（如 ``"红方设置"``）。
+
+        Returns:
+            tuple: ``(QGroupBox, QComboBox, QLabel, QSpinBox)`` 四元组，
+            分别为分组容器、AI 类型下拉框、参数标签和参数数值框。
+        """
         group = QGroupBox(title)
         layout = QVBoxLayout()
         group.setLayout(layout)
@@ -442,7 +591,13 @@ class MainWindow(QMainWindow):
         return group, combo, param_label, param_spin
 
     def _on_type_combo_changed(self, index: int, label: QLabel, spin: QSpinBox) -> None:
-        """AI 类型切换时动态调整参数控件的可见性和范围。"""
+        """AI 类型下拉框切换时的回调——动态调整参数控件的可见性和数值范围。
+
+        Args:
+            index: 当前选中的 AI 类型索引。
+            label: 对应的参数标签控件。
+            spin: 对应的参数数值输入框控件。
+        """
         if index == self._IDX_MINIMAX:
             label.setText("搜索深度：")
             label.show()
@@ -463,7 +618,15 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _sync_param_from_agent(agent, label: QLabel, spin: QSpinBox) -> None:
-        """根据已有 agent 实例回写参数控件的值（用于外部注入 controller 时）。"""
+        """根据已有 AI 代理实例回写参数控件的值。
+
+        用于外部注入已配置好的 Controller 时，将 AI 参数同步到 UI 控件。
+
+        Args:
+            agent: AI 代理实例，``None`` 表示人类。
+            label: 对应的参数标签控件。
+            spin: 对应的参数数值输入框控件。
+        """
         if agent is None:
             label.hide()
             spin.hide()
@@ -490,7 +653,15 @@ class MainWindow(QMainWindow):
     # ────────────────────── 开始 / 结束 对局 ──────────────────────
 
     def _build_agent_from_ui(self, combo: QComboBox, spin: QSpinBox):
-        """根据当前下拉框和 SpinBox 实例化 agent（Human 返回 None）。"""
+        """根据当前 UI 配置实例化 AI 代理。
+
+        Args:
+            combo: AI 类型下拉框控件。
+            spin: 参数数值输入框控件。
+
+        Returns:
+            AI 代理实例；若选择 Human 则返回 ``None``。
+        """
         idx = combo.currentIndex()
         if idx == self._IDX_HUMAN:
             return None
@@ -503,13 +674,14 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_start_stop(self) -> None:
-        """「开始对局」/「结束/重置对局」切换按钮的统一入口。"""
+        """「开始对局」/「结束/重置对局」切换按钮的统一入口回调。"""
         if not self.is_game_running:
             self._start_game()
         else:
             self._stop_game()
 
     def _start_game(self) -> None:
+        """启动新对局：读取 UI 配置 → 实例化 AI → 重置棋盘 → 进入对局模式。"""
         # 1) 从 UI 读取并实例化 agents
         self.controller.red_agent = self._build_agent_from_ui(
             self._red_combo, self._red_param_spin
@@ -540,6 +712,7 @@ class MainWindow(QMainWindow):
         self.check_and_run_ai()
 
     def _stop_game(self) -> None:
+        """结束当前对局：中断 AI 线程 → 恢复配置模式 → 清除交互状态。"""
         # 1) 中断 AI 线程
         self._run_id += 1
         if self._ai_thread and self._ai_thread.isRunning():
@@ -565,7 +738,11 @@ class MainWindow(QMainWindow):
         self.append_log("[UI] 对局已结束")
 
     def _set_config_enabled(self, enabled: bool) -> None:
-        """启用 / 禁用所有配置面板控件。"""
+        """批量启用或禁用所有配置面板控件。
+
+        Args:
+            enabled: ``True`` 启用，``False`` 禁用。
+        """
         for w in (
             self._red_combo,
             self._red_param_spin,
@@ -574,9 +751,10 @@ class MainWindow(QMainWindow):
         ):
             w.setEnabled(enabled)
 
-    # ────────────────────── agent 描述 / 映射 ──────────────────────
+    # ────────────────────── 代理描述 / 映射 ──────────────────────
 
     def _sync_human_color_from_controller(self) -> None:
+        """根据控制器中红黑双方的 AI 配置推断人类玩家所执颜色。"""
         r, b = self.controller.red_agent, self.controller.black_agent
         if r is None and b is not None:
             self.human_color = "red"
@@ -587,7 +765,14 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _agent_label(agent) -> str:
-        """生成用于状态栏的简短 AI 描述。"""
+        """生成用于状态栏显示的简短 AI 描述。
+
+        Args:
+            agent: AI 代理实例，``None`` 表示人类。
+
+        Returns:
+            str: 简短描述字符串（如 ``"Minimax 深度=3"``）。
+        """
         if agent is None:
             return "Human"
         cls = type(agent).__name__
@@ -604,6 +789,14 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _agent_to_combo_index(agent) -> int:
+        """将 AI 代理实例映射为 UI 下拉框对应的索引值。
+
+        Args:
+            agent: AI 代理实例，``None`` 表示人类。
+
+        Returns:
+            int: 对应的下拉框选项索引（0=人类, 1=随机, 2=极大极小, 3=MCTS）。
+        """
         if agent is None:
             return 0
         cls = type(agent).__name__
@@ -616,11 +809,24 @@ class MainWindow(QMainWindow):
         return 0
 
     def _side_name(self, color: str) -> str:
+        """将颜色代码转换为中文阵营名称。
+
+        Args:
+            color: 阵营颜色（``'red'`` 或 ``'black'``）。
+
+        Returns:
+            str: ``"红方"`` 或 ``"黑方"``。
+        """
         return "红方" if color == "red" else "黑方"
 
     # ────────────────────── 游戏内逻辑 ──────────────────────
 
     def _finalize_after_legal_move(self, outcome: MoveOutcome) -> None:
+        """合法走子后的统一收尾处理：刷新状态、检测终局、触发下一轮 AI。
+
+        Args:
+            outcome: 本步走子的结果对象。
+        """
         if not outcome.ok:
             return
         self._refresh_status()
@@ -646,6 +852,11 @@ class MainWindow(QMainWindow):
         self.start_btn.setText("开始对局")
 
     def append_log(self, text: str) -> None:
+        """向日志控制台追加一条带时间戳的消息，并自动滚动到底部。
+
+        Args:
+            text: 日志消息文本。
+        """
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_console.appendPlainText(f"[{ts}] {text}")
         cursor = self.log_console.textCursor()
@@ -655,6 +866,7 @@ class MainWindow(QMainWindow):
         sb.setValue(sb.maximum())
 
     def _refresh_status(self) -> None:
+        """根据当前对局状态刷新状态栏显示文本。"""
         result = self.controller.current_result()
         if result["game_over"]:
             winner = result["winner"]
@@ -678,6 +890,15 @@ class MainWindow(QMainWindow):
     # ────────────────────── 棋盘点击 ──────────────────────
 
     def _on_square_clicked(self, row: int, col: int) -> None:
+        """棋盘格点击事件处理器：实现选子 → 落子的两步交互流程。
+
+        第一次点击选择己方棋子（放大高亮），第二次点击指定目标位置完成走子。
+        点击已选中棋子可取消选择。
+
+        Args:
+            row: 被点击格的行号。
+            col: 被点击格的列号。
+        """
         if not self.is_game_running:
             return
         if self.controller.is_game_over():
@@ -729,7 +950,11 @@ class MainWindow(QMainWindow):
     # ────────────────────── AI 后台线程 ──────────────────────
 
     def check_and_run_ai(self) -> None:
-        """仅当 is_game_running 且轮到 AI 时，才启动后台计算线程。"""
+        """检查是否轮到 AI 行棋，若是则启动后台计算线程。
+
+        仅当对局正在进行、未终局且当前轮次为 AI 方时才启动线程。
+        若已有 AI 线程正在运行则跳过，避免重复启动。
+        """
         if not self.is_game_running:
             return
         if self.controller.is_game_over():
@@ -769,6 +994,15 @@ class MainWindow(QMainWindow):
     def _on_ai_move_ready(
         self, move: Optional[Move], stats: Optional[dict], run_id: int
     ) -> None:
+        """AI 计算完成的信号槽：接收走法并应用到棋盘。
+
+        通过 ``run_id`` 过滤过期信号（防止旧线程的结果污染当前对局）。
+
+        Args:
+            move: AI 选择的走法，``None`` 表示无合法走法。
+            stats: AI 搜索统计信息字典（耗时、节点数等）。
+            run_id: 本次计算的唯一标识，用于判断信号是否仍然有效。
+        """
         if run_id != self._run_id:
             return
         print(f"[UI] AI move signal received: {move}")
@@ -795,7 +1029,11 @@ class MainWindow(QMainWindow):
             self.check_and_run_ai()
 
     def _log_random_stats(self, stats: dict) -> None:
-        """Random AI 极简日志。"""
+        """将 Random AI 的极简统计信息写入日志。
+
+        Args:
+            stats: 包含 ``time_taken`` 等键的统计字典。
+        """
         time_taken = stats.get("time_taken", 0)
         time_str = (
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
@@ -803,7 +1041,12 @@ class MainWindow(QMainWindow):
         self.append_log(f"Random AI 随机落子")
         self.append_log(f"耗时 (秒): {time_str}s")
     def _log_mcts_stats(self, stats: dict) -> None:
-        """格式化 MCTS 搜索统计并写入日志（多行，与 Minimax 风格对齐）。"""
+        """将 MCTS 搜索统计信息格式化后写入日志。
+
+        Args:
+            stats: 包含 ``time_taken``, ``simulations``, ``workers``,
+                ``win_rate`` 等键的统计字典。
+        """
         time_taken = stats.get("time_taken", 0)
         time_str = (
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
@@ -816,7 +1059,12 @@ class MainWindow(QMainWindow):
             self.append_log(f"当前胜率: {win_rate}")
 
     def _log_minimax_stats(self, stats: dict) -> None:
-        """格式化 Minimax 搜索统计并写入日志。"""
+        """将 Minimax 搜索统计信息格式化后写入日志。
+
+        Args:
+            stats: 包含 ``time_taken``, ``depth``, ``nodes_evaluated``,
+                ``tt_hits`` 等键的统计字典。
+        """
         time_taken = stats.get("time_taken", "?")
         time_str = (
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)

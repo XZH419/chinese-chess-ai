@@ -1,8 +1,8 @@
-"""Model layer (state + rules).
+"""模型层（棋盘状态 + 规则引擎）。
 
-Responsibilities:
-- `piece.py`: piece entity (data + display representation).
-- `board.py`: board state container (pure state management only).
-- `rules.py`: all move legality + move generation + check/end conditions.
+各模块职责：
+- ``piece.py``: 棋子实体（数据 + 显示符号映射）。
+- ``board.py``: 棋盘状态容器（纯状态管理，含 Zobrist 增量维护）。
+- ``rules.py``: 完整规则引擎（走法合法性、将军检测、走法生成、终局判定）。
+- ``zobrist.py``: Zobrist 随机数表（供棋盘哈希与置换表使用）。
 """
-

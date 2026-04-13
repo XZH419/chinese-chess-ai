@@ -1,2 +1,4 @@
-"""View layer for the chess project (GUI/CLI frontends)."""
+"""视图层（GUI / CLI 前端）。
 
+本层仅负责用户输入采集与界面渲染，所有游戏逻辑委托给控制器层处理。
+"""
