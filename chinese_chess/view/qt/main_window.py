@@ -15,12 +15,14 @@ from PyQt5.QtWidgets import (
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -130,13 +132,13 @@ class PixmapPieceItem(QGraphicsObject):
     def __init__(self, pixmap: QPixmap):
         super().__init__()
         self._pixmap = pixmap
-        # 以“图元中心”为锚点：后续 setPos(x, y) 直接给中心点坐标即可
+        # 以"图元中心"为锚点：后续 setPos(x, y) 直接给中心点坐标即可
         self._half_w = self._pixmap.width() / 2.0
         self._half_h = self._pixmap.height() / 2.0
 
     def boundingRect(self):
         # PyQt5 要求 boundingRect() **必须**返回 QRectF（不能是 QRect）
-        # 同时把包围盒改成“以中心为原点”，与 setPos 的中心点语义保持一致
+        # 同时把包围盒改成"以中心为原点"，与 setPos 的中心点语义保持一致
         return QRectF(-self._half_w, -self._half_h, self._pixmap.width(), self._pixmap.height())
 
     def paint(self, painter: QPainter, option, widget=None):
@@ -145,14 +147,14 @@ class PixmapPieceItem(QGraphicsObject):
 
 
 class XiangqiBoardView(QGraphicsView):
-    """对齐参考项目的“贴图棋盘 + 贴图棋子”界面。
+    """对齐参考项目的"贴图棋盘 + 贴图棋子"界面。
 
     重要约束：
     - 本类只做渲染与鼠标交互坐标转换
     - 走子是否合法/胜负判定/AI 决策：全部交给 controller
     """
 
-    # 这些参数用于“模型坐标(row,col) <-> 场景坐标(x,y)”换算。
+    # 这些参数用于"模型坐标(row,col) <-> 场景坐标(x,y)"换算。
     # 由于 Swing(JFrame) 与 Qt(QGraphicsView) 的坐标/边距行为不同，必须可调。
     VIEW_WIDTH = 700
     VIEW_HEIGHT = 712
@@ -200,7 +202,7 @@ class XiangqiBoardView(QGraphicsView):
 
     def view_to_model(self, x: float, y: float) -> Optional[Pos]:
         # 点击坐标 -> 格子坐标（row,col）
-        # 为便于调试：先做可调偏移，再做“就近吸附”。
+        # 为便于调试：先做可调偏移，再做"就近吸附"。
         x = x + self.CLICK_X_OFFSET
         y = y + self.CLICK_Y_OFFSET
         col = int((x - float(self.SX_OFFSET) + float(self.SX_COE) / 2) / float(self.SX_COE))
@@ -267,7 +269,7 @@ class XiangqiBoardView(QGraphicsView):
             self._scene.removeItem(captured_item)
             self._piece_items.pop(dst, None)
 
-        # 移动过程中保持放大（像“拿起来”悬浮移动）
+        # 移动过程中保持放大（像"拿起来"悬浮移动）
         moving_item.setScale(1.2)
 
         anim = QPropertyAnimation(moving_item, b"pos")
@@ -279,7 +281,7 @@ class XiangqiBoardView(QGraphicsView):
         anim.setEndValue(QPointF(p.x(), p.y()))
         # 非阻塞：start() 只会把动画注册进事件循环，不会卡住主线程
         anim.start()
-        # 动画结束后缩回，模拟“落地”
+        # 动画结束后缩回，模拟"落地"
         anim.finished.connect(lambda: moving_item.setScale(1.0))
         moving_item._anim = anim  # type: ignore[attr-defined]
 
@@ -287,35 +289,55 @@ class XiangqiBoardView(QGraphicsView):
         self._piece_items[dst] = moving_item
 
 
+# ═══════════════════════════════════════════════════════════════
+#  MainWindow：配置 → 开始 → 对局 → 结束 的完整生命周期
+# ═══════════════════════════════════════════════════════════════
+
+
 class MainWindow(QMainWindow):
-    """新 GUI：风格对齐参考 GameView（贴图棋盘/棋子 + 侧边信息区）。"""
+    """中国象棋 GUI 主窗口。
+
+    启动后处于「配置阶段」——用户可在右侧面板选择红/黑双方 AI 类型及参数，
+    点击「开始对局」后进入「对局阶段」，棋盘点击和 AI 自动行棋才被激活。
+    """
+
+    _AI_TYPES = ["Human (人类)", "Random (随机)", "Minimax (极大极小)", "MCTS (蒙特卡洛)"]
+    _IDX_HUMAN, _IDX_RANDOM, _IDX_MINIMAX, _IDX_MCTS = 0, 1, 2, 3
 
     def __init__(self, controller: Optional[GameController] = None):
         super().__init__()
 
-        # 无注入时显式默认：人红 vs Minimax 黑（Controller 内不再隐式挂载 AI）
-        self.controller = controller or GameController(
-            red_agent=None,
-            black_agent=MinimaxAI(depth=3),
-        )
+        self.controller = controller or GameController(red_agent=None, black_agent=None)
         self.human_color = "red"
-        self._sync_human_color_from_controller()
+        self.is_game_running = False
 
         self._selected: Optional[Pos] = None
         self._selected_item: Optional[PixmapPieceItem] = None
         self._ai_thread: Optional[AIMoveThread] = None
-        # 用于防止“幽灵走子”：每次 reset 或启动新线程都会递增
         self._run_id = 0
 
         self._init_window()
         self._init_ui()
-        self.append_log("[对局] " + self.controller.matchup_line())
-        self._refresh_status()
-        # 启动时立即检查：如果红方是 AI，则自动走子
-        self.check_and_run_ai()
+        self.status_label.setText("请配置红黑双方，然后点击「开始对局」")
+
+        # 外部注入已带 agent 的 controller 时：同步 UI 并自动开局
+        if controller is not None and (
+            controller.red_agent is not None or controller.black_agent is not None
+        ):
+            self._red_combo.setCurrentIndex(self._agent_to_combo_index(controller.red_agent))
+            self._black_combo.setCurrentIndex(self._agent_to_combo_index(controller.black_agent))
+            self._sync_param_from_agent(
+                controller.red_agent, self._red_param_label, self._red_param_spin
+            )
+            self._sync_param_from_agent(
+                controller.black_agent, self._black_param_label, self._black_param_spin
+            )
+            self._on_start_stop()
+
+    # ────────────────────── 窗口 / 布局 ──────────────────────
 
     def _init_window(self) -> None:
-        self.setWindowTitle(f"中国象棋 — {self.controller.matchup_line()}")
+        self.setWindowTitle("中国象棋")
         icon_path = _img("icon.png")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -323,36 +345,71 @@ class MainWindow(QMainWindow):
     def _init_ui(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
+        main_layout = QHBoxLayout()
+        root.setLayout(main_layout)
 
-        main = QHBoxLayout()
-        root.setLayout(main)
-
-        # Left: board graphics
+        # ── 左侧：棋盘 ──
         self.board_view = XiangqiBoardView(self.controller)
         self.board_view.square_clicked.connect(self._on_square_clicked)
-        main.addWidget(self.board_view, 1)
+        main_layout.addWidget(self.board_view, 1)
 
-        # Right: info + buttons (keep some valuable existing controls)
+        # ── 右侧：配置 + 状态 + 日志 ──
         self.info_panel = QWidget()
-        self.info_panel.setMinimumWidth(250)
+        self.info_panel.setMinimumWidth(270)
         right = QVBoxLayout()
         self.info_panel.setLayout(right)
-        main.addWidget(self.info_panel, 0)
+        main_layout.addWidget(self.info_panel, 0)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("font-weight: bold;")
         right.addWidget(self.status_label)
 
-        # AI 类型选择（黑方）
-        ai_label = QLabel("黑方 AI 类型：")
-        right.addWidget(ai_label)
-        self._ai_combo = QComboBox()
-        self._ai_combo.addItems(["Human", "Random", "Minimax", "MCTS (蒙特卡洛)"])
-        self._ai_combo.setCurrentIndex(self._agent_to_combo_index(self.controller.black_agent))
-        self._ai_combo.currentIndexChanged.connect(self._on_ai_type_changed)
-        right.addWidget(self._ai_combo)
+        # 红方配置 GroupBox
+        (
+            self._red_group,
+            self._red_combo,
+            self._red_param_label,
+            self._red_param_spin,
+        ) = self._build_side_group("红方设置")
+        self._red_combo.setCurrentIndex(self._IDX_HUMAN)
+        self._red_combo.currentIndexChanged.connect(
+            lambda idx: self._on_type_combo_changed(
+                idx, self._red_param_label, self._red_param_spin
+            )
+        )
+        self._on_type_combo_changed(
+            self._red_combo.currentIndex(), self._red_param_label, self._red_param_spin
+        )
+        right.addWidget(self._red_group)
 
-        # GUI 实时控制台（Dashboard）
+        # 黑方配置 GroupBox
+        (
+            self._black_group,
+            self._black_combo,
+            self._black_param_label,
+            self._black_param_spin,
+        ) = self._build_side_group("黑方设置")
+        self._black_combo.setCurrentIndex(self._IDX_MINIMAX)
+        self._black_combo.currentIndexChanged.connect(
+            lambda idx: self._on_type_combo_changed(
+                idx, self._black_param_label, self._black_param_spin
+            )
+        )
+        self._on_type_combo_changed(
+            self._black_combo.currentIndex(), self._black_param_label, self._black_param_spin
+        )
+        right.addWidget(self._black_group)
+
+        # 开始 / 结束 按钮
+        self.start_btn = QPushButton("开始对局")
+        self.start_btn.setStyleSheet(
+            "QPushButton { font-size: 14px; padding: 6px; font-weight: bold; }"
+        )
+        self.start_btn.clicked.connect(self._on_start_stop)
+        right.addWidget(self.start_btn)
+
+        # 日志控制台
         self.log_console = QPlainTextEdit()
         self.log_console.setReadOnly(True)
         self.log_console.setLineWrapMode(QPlainTextEdit.WidgetWidth)
@@ -362,68 +419,192 @@ class MainWindow(QMainWindow):
         self.log_console.setFont(QFont("Consolas", 10))
         right.addWidget(self.log_console, 1)
 
-        self.reset_btn = QPushButton("重置")
-        self.reset_btn.clicked.connect(self._reset_game)
-        right.addWidget(self.reset_btn)
+    # ────────────────────── UI 构建辅助 ──────────────────────
 
-        right.addStretch(1)
+    def _build_side_group(self, title: str):
+        """构建单侧配置 GroupBox，返回 (group, combo, param_label, param_spin)。"""
+        group = QGroupBox(title)
+        layout = QVBoxLayout()
+        group.setLayout(layout)
+
+        combo = QComboBox()
+        combo.addItems(self._AI_TYPES)
+        layout.addWidget(combo)
+
+        param_label = QLabel("")
+        layout.addWidget(param_label)
+
+        param_spin = QSpinBox()
+        param_spin.setMinimum(1)
+        param_spin.setMaximum(100000)
+        layout.addWidget(param_spin)
+
+        return group, combo, param_label, param_spin
+
+    def _on_type_combo_changed(self, index: int, label: QLabel, spin: QSpinBox) -> None:
+        """AI 类型切换时动态调整参数控件的可见性和范围。"""
+        if index == self._IDX_MINIMAX:
+            label.setText("搜索深度：")
+            label.show()
+            spin.setRange(1, 8)
+            spin.setValue(3)
+            spin.setSingleStep(1)
+            spin.show()
+        elif index == self._IDX_MCTS:
+            label.setText("模拟次数：")
+            label.show()
+            spin.setRange(100, 100000)
+            spin.setValue(5000)
+            spin.setSingleStep(500)
+            spin.show()
+        else:
+            label.hide()
+            spin.hide()
+
+    @staticmethod
+    def _sync_param_from_agent(agent, label: QLabel, spin: QSpinBox) -> None:
+        """根据已有 agent 实例回写参数控件的值（用于外部注入 controller 时）。"""
+        if agent is None:
+            label.hide()
+            spin.hide()
+            return
+        cls = type(agent).__name__
+        if cls == "MinimaxAI":
+            d = getattr(agent, "depth", 3)
+            label.setText("搜索深度：")
+            label.show()
+            spin.setRange(1, 8)
+            spin.setValue(int(d))
+            spin.show()
+        elif cls == "MCTSAI":
+            s = getattr(agent, "max_simulations", 5000)
+            label.setText("模拟次数：")
+            label.show()
+            spin.setRange(100, 100000)
+            spin.setValue(int(s))
+            spin.show()
+        else:
+            label.hide()
+            spin.hide()
+
+    # ────────────────────── 开始 / 结束 对局 ──────────────────────
+
+    def _build_agent_from_ui(self, combo: QComboBox, spin: QSpinBox):
+        """根据当前下拉框和 SpinBox 实例化 agent（Human 返回 None）。"""
+        idx = combo.currentIndex()
+        if idx == self._IDX_HUMAN:
+            return None
+        if idx == self._IDX_RANDOM:
+            return RandomAI()
+        if idx == self._IDX_MINIMAX:
+            return MinimaxAI(depth=spin.value())
+        if idx == self._IDX_MCTS:
+            return MCTSAI(time_limit=5.0, max_simulations=spin.value())
+        return None
+
+    def _on_start_stop(self) -> None:
+        """「开始对局」/「结束/重置对局」切换按钮的统一入口。"""
+        if not self.is_game_running:
+            self._start_game()
+        else:
+            self._stop_game()
+
+    def _start_game(self) -> None:
+        # 1) 从 UI 读取并实例化 agents
+        self.controller.red_agent = self._build_agent_from_ui(
+            self._red_combo, self._red_param_spin
+        )
+        self.controller.black_agent = self._build_agent_from_ui(
+            self._black_combo, self._black_param_spin
+        )
+        self._sync_human_color_from_controller()
+
+        # 2) 重置棋盘
+        self.controller.reset_game()
+        self.board_view._controller = self.controller
+        self.board_view.update_all()
+        self._selected = None
+        self._selected_item = None
+
+        # 3) 切换为"对局中"状态
+        self.is_game_running = True
+        self._set_config_enabled(False)
+        self.start_btn.setText("结束 / 重置对局")
+
+        # 4) UI 反馈
+        matchup = self.controller.matchup_line()
+        self.setWindowTitle(f"中国象棋 — {matchup}")
+        self.log_console.clear()
+        self.append_log(f"[对局] {matchup}")
+        self._refresh_status()
+        self.check_and_run_ai()
+
+    def _stop_game(self) -> None:
+        # 1) 中断 AI 线程
+        self._run_id += 1
+        if self._ai_thread and self._ai_thread.isRunning():
+            self._ai_thread.requestInterruption()
+            try:
+                self._ai_thread.move_ready.disconnect(self._on_ai_move_ready)
+            except Exception:
+                pass
+        self._ai_thread = None
+
+        # 2) 切换为"配置中"状态
+        self.is_game_running = False
+        self._set_config_enabled(True)
+        self.start_btn.setText("开始对局")
+
+        # 3) 清除棋盘交互状态
+        if self._selected_item is not None:
+            self._selected_item.setScale(1.0)
+        self._selected = None
+        self._selected_item = None
+
+        self.status_label.setText("对局已结束，请重新配置后点击「开始对局」")
+        self.append_log("[UI] 对局已结束")
+
+    def _set_config_enabled(self, enabled: bool) -> None:
+        """启用 / 禁用所有配置面板控件。"""
+        for w in (
+            self._red_combo,
+            self._red_param_spin,
+            self._black_combo,
+            self._black_param_spin,
+        ):
+            w.setEnabled(enabled)
+
+    # ────────────────────── agent 描述 / 映射 ──────────────────────
 
     def _sync_human_color_from_controller(self) -> None:
-        """与 GameController 一致：仅一方为人类时，把点击走子绑定到该方（避免红黑弄反）。"""
         r, b = self.controller.red_agent, self.controller.black_agent
         if r is None and b is not None:
             self.human_color = "red"
         elif b is None and r is not None:
             self.human_color = "black"
         else:
-            # 双 AI 或双方人类：点击逻辑仍按「红方侧」占位；双人同机可后续扩展选边
             self.human_color = "red"
-
-    def _finalize_after_legal_move(self, outcome: MoveOutcome) -> None:
-        """落子已成功写入棋盘后：刷新 UI、处理和棋弹窗、抬高 run_id 以丢弃迟到的 AI 信号。"""
-        if not outcome.ok:
-            return
-        self._refresh_status()
-        if outcome.game_over:
-            self._run_id += 1
-            if outcome.winner is None:
-                msg = "游戏结束：和棋（死局或三次重复）！"
-                self.append_log(msg)
-                QMessageBox.information(self, "对局结束", msg)
-        self.check_and_run_ai()
-
-    def append_log(self, text: str) -> None:
-        """向右侧 log_console 追加一条带时间戳的日志，并自动滚动到底部。"""
-        ts = datetime.now().strftime("%H:%M:%S")
-        self.log_console.appendPlainText(f"[{ts}] {text}")
-        self.log_console.ensureCursorVisible()
-
-    def _side_name(self, color: str) -> str:
-        return "红方" if color == "red" else "黑方"
-
-    def _agent_depth_hint(self, agent) -> Optional[int]:
-        d = getattr(agent, "depth", None)
-        return int(d) if isinstance(d, int) else None
 
     @staticmethod
     def _agent_label(agent) -> str:
         """生成用于状态栏的简短 AI 描述。"""
+        if agent is None:
+            return "Human"
         cls = type(agent).__name__
         if cls == "MinimaxAI":
             d = getattr(agent, "depth", None)
-            return f"深度: {d}" if isinstance(d, int) else "Minimax"
+            return f"Minimax 深度={d}" if isinstance(d, int) else "Minimax"
         if cls == "MCTSAI":
-            sims = getattr(agent, "max_simulations", None)
-            return f"MCTS, {sims} sims" if sims else "MCTS"
+            s = getattr(agent, "max_simulations", None)
+            return f"MCTS {s} sims" if s else "MCTS"
         if cls == "RandomAI":
             return "Random"
         return cls
 
     @staticmethod
     def _agent_to_combo_index(agent) -> int:
-        """将 agent 实例映射到 ComboBox 索引。"""
         if agent is None:
-            return 0  # Human
+            return 0
         cls = type(agent).__name__
         if cls == "RandomAI":
             return 1
@@ -433,22 +614,35 @@ class MainWindow(QMainWindow):
             return 3
         return 0
 
-    def _on_ai_type_changed(self, index: int) -> None:
-        """用户切换黑方 AI 类型后，重建 agent 并重置对局。"""
-        if index == 0:
-            new_agent = None
-        elif index == 1:
-            new_agent = RandomAI()
-        elif index == 2:
-            new_agent = MinimaxAI(depth=3)
-        elif index == 3:
-            new_agent = MCTSAI(time_limit=3.0, max_simulations=5000)
-        else:
-            new_agent = None
+    def _side_name(self, color: str) -> str:
+        return "红方" if color == "red" else "黑方"
 
-        self.controller.black_agent = new_agent
-        self._sync_human_color_from_controller()
-        self._reset_game()
+    # ────────────────────── 游戏内逻辑 ──────────────────────
+
+    def _finalize_after_legal_move(self, outcome: MoveOutcome) -> None:
+        if not outcome.ok:
+            return
+        self._refresh_status()
+        if outcome.game_over:
+            self._run_id += 1
+            if outcome.winner is None:
+                msg = "游戏结束：和棋（死局或三次重复）！"
+                self.append_log(msg)
+                QMessageBox.information(self, "对局结束", msg)
+            self._game_over_ui()
+            return
+        self.check_and_run_ai()
+
+    def _game_over_ui(self) -> None:
+        """对局自然结束后的 UI 收尾：启用配置面板、按钮复位。"""
+        self.is_game_running = False
+        self._set_config_enabled(True)
+        self.start_btn.setText("开始对局")
+
+    def append_log(self, text: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_console.appendPlainText(f"[{ts}] {text}")
+        self.log_console.ensureCursorVisible()
 
     def _refresh_status(self) -> None:
         result = self.controller.current_result()
@@ -459,7 +653,7 @@ class MainWindow(QMainWindow):
             elif winner == "black":
                 self.status_label.setText("黑方获胜！")
             else:
-                self.status_label.setText("游戏结束：和棋（死局或三次重复）！")
+                self.status_label.setText("游戏结束：和棋！")
             return
 
         player = result["current_player"]
@@ -471,37 +665,14 @@ class MainWindow(QMainWindow):
                 f"[{self._side_name(player)}] AI 正在思考 ({self._agent_label(agent)})..."
             )
 
-    def _reset_game(self) -> None:
-        # 1) 安全中断当前计算：防止旧线程回调导致“幽灵走子”
-        self._run_id += 1
-        if self._ai_thread and self._ai_thread.isRunning():
-            self._ai_thread.requestInterruption()
-            try:
-                self._ai_thread.move_ready.disconnect(self._on_ai_move_ready)
-            except Exception:
-                pass
-        self._ai_thread = None
-
-        # 2) 不重建 Controller：只重置棋盘（保持 red/black agent 配置）
-        self.controller.reset_game()
-        self.board_view._controller = self.controller
-        self.board_view.update_all()
-        if self._selected_item is not None:
-            self._selected_item.setScale(1.0)
-        self._selected = None
-        self._selected_item = None
-        self._refresh_status()
-        self.append_log("[UI] 重置对局（保持当前 AI 配置）")
-        self.append_log("[对局] " + self.controller.matchup_line())
-        self.setWindowTitle(f"中国象棋 — {self.controller.matchup_line()}")
-        # 3) 重置后立刻接力：AI vs AI 会自动开新局第一步
-        self.check_and_run_ai()
+    # ────────────────────── 棋盘点击 ──────────────────────
 
     def _on_square_clicked(self, row: int, col: int) -> None:
+        if not self.is_game_running:
+            return
         if self.controller.is_game_over():
             self._refresh_status()
             return
-        # 权限控制：如果当前回合是 AI，则忽略一切鼠标点击
         if self.controller.agent_for(self.controller.board.current_player) is not None:
             return
         if self.controller.board.current_player != self.human_color:
@@ -510,17 +681,14 @@ class MainWindow(QMainWindow):
         piece = self.controller.board.get_piece(row, col)
         clicked_item = self.board_view.piece_item_at(row, col)
 
-        # 1) selecting
         if self._selected is None:
             if piece and piece.color == self.human_color:
                 self._selected = (row, col)
                 self._selected_item = clicked_item
                 if self._selected_item is not None:
-                    # 点击放大（被“拿起来”）
                     self._selected_item.setScale(1.2)
             return
 
-        # 再次点击同一枚棋子：取消选中并缩小
         if self._selected == (row, col):
             if self._selected_item is not None:
                 self._selected_item.setScale(1.0)
@@ -528,10 +696,8 @@ class MainWindow(QMainWindow):
             self._selected_item = None
             return
 
-        # 2) moving
         sr, sc = self._selected
         move: Move = (sr, sc, row, col)
-        # 取消“选中态”（移动动画内部会再放大并在结束时缩回）
         if self._selected_item is not None:
             self._selected_item.setScale(1.0)
         self._selected = None
@@ -546,27 +712,26 @@ class MainWindow(QMainWindow):
 
         print(f"[UI] player move applied: {move}")
         self.append_log(f"[UI] 玩家落子: {move}")
-        # Animate based on model coordinates; do NOT compute rules here.
         self.board_view.animate_move(move)
         self._finalize_after_legal_move(outcome)
 
+    # ────────────────────── AI 后台线程 ──────────────────────
+
     def check_and_run_ai(self) -> None:
-        """接力棒机制：如果当前回合是 AI，则自动启动计算并落子。"""
+        """仅当 is_game_running 且轮到 AI 时，才启动后台计算线程。"""
+        if not self.is_game_running:
+            return
         if self.controller.is_game_over():
             self._refresh_status()
             return
 
         cp = self.controller.board.current_player
-        if cp == "red":
-            current_agent = self.controller.red_agent
-        else:
-            current_agent = self.controller.black_agent
+        current_agent = (
+            self.controller.red_agent if cp == "red" else self.controller.black_agent
+        )
         if current_agent is None:
-            # 人类回合：等待点击
             self._refresh_status()
             return
-
-        # 避免重复启动线程
         if self._ai_thread and self._ai_thread.isRunning():
             return
 
@@ -577,14 +742,12 @@ class MainWindow(QMainWindow):
         self.append_log(f"[UI] 检测到 AI 回合 ({side}, {label})，开始计算...")
 
         board_snapshot = self.controller.board.copy()
-        ai_color = cp
         run_id = self._run_id
         game_hist = list(self.controller.game_history_hashes)
         self._ai_thread = AIMoveThread(
             ai=current_agent,
             board_snapshot=board_snapshot,
-            ai_color=ai_color,
-            # 不再暴露 UI 控件；这里保留一个温和的固定上限，避免极端卡死
+            ai_color=cp,
             time_limit_s=10,
             run_id=run_id,
             game_history_hashes=game_hist,
@@ -592,15 +755,22 @@ class MainWindow(QMainWindow):
         self._ai_thread.move_ready.connect(self._on_ai_move_ready)
         self._ai_thread.start()
 
-    def _on_ai_move_ready(self, move: Optional[Move], stats: Optional[dict], run_id: int) -> None:
-        # 如果这是旧局/旧线程的回调，直接忽略
+    def _on_ai_move_ready(
+        self, move: Optional[Move], stats: Optional[dict], run_id: int
+    ) -> None:
         if run_id != self._run_id:
             return
         print(f"[UI] AI move signal received: {move}")
         if stats:
             time_taken = stats.get("time_taken", "?")
-            self.append_log("搜索耗时 (秒): " + (f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)))
-
+            self.append_log(
+                "搜索耗时 (秒): "
+                + (
+                    f"{time_taken:.3f}"
+                    if isinstance(time_taken, (int, float))
+                    else str(time_taken)
+                )
+            )
             sims = stats.get("simulations")
             if sims is not None:
                 self.append_log(f"MCTS 模拟次数: {sims}")
@@ -615,11 +785,12 @@ class MainWindow(QMainWindow):
         self.append_log("[UI] AI 信号接收完成，执行落子。")
         self.append_log("--------------------------")
         if move:
-            outcome = self.controller.apply_move(move, player=self.controller.board.current_player)
+            outcome = self.controller.apply_move(
+                move, player=self.controller.board.current_player
+            )
             self.board_view.animate_move(move)
             self._finalize_after_legal_move(outcome)
         else:
-            # AI 无合法走法（困毙/将死由 Rules.winner 判定）
             self._refresh_status()
             self.check_and_run_ai()
 
@@ -631,4 +802,3 @@ if __name__ == "__main__":
     w = MainWindow()
     w.show()
     sys.exit(app.exec_())
-
