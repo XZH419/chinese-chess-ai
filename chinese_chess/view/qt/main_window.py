@@ -7,7 +7,7 @@ from typing import Dict, Optional, Tuple
 import traceback
 
 from PyQt5.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon, QPainter, QPixmap
+from PyQt5.QtGui import QFont, QIcon, QPainter, QPixmap, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
@@ -648,7 +648,11 @@ class MainWindow(QMainWindow):
     def append_log(self, text: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_console.appendPlainText(f"[{ts}] {text}")
-        self.log_console.ensureCursorVisible()
+        cursor = self.log_console.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.log_console.setTextCursor(cursor)
+        sb = self.log_console.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def _refresh_status(self) -> None:
         result = self.controller.current_result()
