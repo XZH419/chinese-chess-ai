@@ -47,7 +47,7 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from chinese_chess.model.board import Board
-from chinese_chess.model.rules import Rules
+from chinese_chess.model.rules import MoveEntry, Rules
 
 from .evaluation import Evaluation
 from .search_move_helpers import (
@@ -57,6 +57,7 @@ from .search_move_helpers import (
 )
 from .opening_book import OPENING_BOOK, mirror_move
 from .mcts import (
+    _append_path_move_entry,
     _policy_attack_bias,
     _order_untried_moves_policy,
     _pick_rollout_move_fast,
@@ -776,9 +777,14 @@ def _eval_to_winrate(board: Board, root_player: str) -> float:
     return 1.0 / (1.0 + math.exp(-raw / _SCORE_SCALE))
 
 
-def _terminal_score(board: Board, root_player: str) -> float:
-    """终局局面评估：胜 1.0 / 负 0.0 / 和 0.5。"""
-    w = Rules.winner(board)
+def _terminal_score(
+    board: Board,
+    root_player: str,
+    *,
+    move_history: Optional[List[MoveEntry]] = None,
+) -> float:
+    """终局局面评估：胜 1.0 / 负 0.0 / 未分 0.5（与 ``Rules.winner(..., move_history)`` 一致）。"""
+    w = Rules.winner(board, move_history)
     if w == root_player:
         return 1.0
     if w is not None:
@@ -823,6 +829,7 @@ def _simulate_or_probe(
     node_visits: int = 0,
     *,
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
+    path_history: Optional[List[MoveEntry]] = None,
 ) -> Tuple[float, Set[Move4], Set[Move4]]:
     """轻量级伪合法 rollout + 分级选择性 minimax probe。
 
@@ -837,6 +844,7 @@ def _simulate_or_probe(
 
     Args:
         gives_check_cache: 与本棵搜索树共用，加速 rollout 内 ``_move_gives_check``。
+        path_history: 到达当前节点前的 ``MoveEntry`` 链。
     """
     sim_board = board.copy()
     b_grid = sim_board.board
@@ -844,10 +852,22 @@ def _simulate_or_probe(
     red_moves: Set[Move4] = set()
     black_moves: Set[Move4] = set()
     is_last_capture = False
+    hist: List[MoveEntry] = (
+        list(path_history)
+        if path_history is not None
+        else [MoveEntry(pos_hash=sim_board.zobrist_hash)]
+    )
+    if not hist or hist[-1].pos_hash != sim_board.zobrist_hash:
+        hist = [MoveEntry(pos_hash=sim_board.zobrist_hash)]
 
     for _ in range(rollout_limit):
         cp = sim_board.current_player
         opp = "black" if cp == "red" else "red"
+
+        st_pf, _off_pf = Rules.perpetual_check_status(sim_board, hist)
+        if st_pf == "forfeit" and _off_pf is not None:
+            w_pf = "black" if _off_pf == "red" else "red"
+            return (1.0 if w_pf == root_player else 0.0), red_moves, black_moves
 
         # O(1) 终局检测：对方老将被将军 → 当前方可"吃将"获胜
         if Rules.is_king_in_check(sim_board, opp):
@@ -864,6 +884,7 @@ def _simulate_or_probe(
             king_cap = _find_king_capture(sim_board, cp, b_grid, okr, okc)
             if king_cap is not None:
                 sim_board.apply_move(*king_cap)
+                _append_path_move_entry(hist, sim_board, king_cap, cp)
                 if cp == "red":
                     red_moves.add(king_cap)
                 else:
@@ -873,6 +894,7 @@ def _simulate_or_probe(
         chosen, is_last_capture = _pick_rollout_move_fast(
             sim_board, moves, b_grid, gives_check_cache=gives_check_cache,
         )
+        _append_path_move_entry(hist, sim_board, chosen, cp)
         if cp == "red":
             red_moves.add(chosen)
         else:
@@ -930,6 +952,7 @@ def _expand_one(
     board: Board,
     node: MCTSMinimaxNode,
     move_stack: List[Tuple[Move4, Any]],
+    entry_stack: List[MoveEntry],
     tt: Dict[int, MCTSMinimaxNode],
     probe_state: dict,
 ) -> Optional[Tuple[Move4, MCTSMinimaxNode]]:
@@ -948,6 +971,7 @@ def _expand_one(
             continue
         captured, _ = applied
         move_stack.append((move, captured))
+        _append_path_move_entry(entry_stack, board, move, mover)
         child_hash = board.zobrist_hash
         existing = tt.get(child_hash)
         if existing is not None:
@@ -1011,6 +1035,7 @@ def _run_single_mcts_minimax_tree(
     max_simulations: int,
     time_limit: float,
     seed_offset: int = 0,
+    root_move_history: Optional[List[MoveEntry]] = None,
 ) -> Tuple[Dict[Move4, Dict[str, float]], Dict[str, int]]:
     """在独立进程中执行一棵完整的 MCTS-Minimax 搜索树。
 
@@ -1053,6 +1078,14 @@ def _run_single_mcts_minimax_tree(
         if time.time() - t0 >= time_limit:
             break
 
+        if root_move_history is not None and (
+            len(root_move_history) > 0
+            and root_move_history[-1].pos_hash == board.zobrist_hash
+        ):
+            entry_stack: List[MoveEntry] = list(root_move_history)
+        else:
+            entry_stack = [MoveEntry(pos_hash=board.zobrist_hash)]
+
         node = root
         path: List[MCTSMinimaxNode] = [root]
 
@@ -1060,7 +1093,9 @@ def _run_single_mcts_minimax_tree(
         while node.is_fully_expanded() and node.children:
             log_n = math.log(node.visits) if node.visits > 0 else 0.0
             edge_move, next_node = node.best_child_ucb(log_n)
+            mover_sel = board.current_player
             captured = board.apply_move(*edge_move)
+            _append_path_move_entry(entry_stack, board, edge_move, mover_sel)
             move_stack.append((edge_move, captured))
             path.append(next_node)
             node = next_node
@@ -1069,7 +1104,9 @@ def _run_single_mcts_minimax_tree(
         node.ensure_moves(board, gives_check_cache)
         expanded = False
         if node.untried_moves:
-            result = _expand_one(board, node, move_stack, tt, probe_state)
+            result = _expand_one(
+                board, node, move_stack, entry_stack, tt, probe_state
+            )
             if result is not None:
                 _exp_move, child = result
                 path.append(child)
@@ -1077,7 +1114,9 @@ def _run_single_mcts_minimax_tree(
                 expanded = True
 
         if not expanded and not node.children and node.visits > 0:
-            sim_result = _terminal_score(board, root_player)
+            sim_result = _terminal_score(
+                board, root_player, move_history=entry_stack
+            )
             red_moves: Set[Move4] = set()
             black_moves: Set[Move4] = set()
         else:
@@ -1087,6 +1126,7 @@ def _run_single_mcts_minimax_tree(
                 sims_done=sims_done,
                 node_visits=node.visits,
                 gives_check_cache=gives_check_cache,
+                path_history=entry_stack,
             )
 
         # ── Backpropagation ──
@@ -1096,6 +1136,7 @@ def _run_single_mcts_minimax_tree(
         # 还原棋盘
         while move_stack:
             mv, cap = move_stack.pop()
+            entry_stack.pop()
             board.undo_move(*mv, cap)
 
     # 收集根子节点统计
@@ -1171,9 +1212,15 @@ class MCTSMinimaxAI:
         board: Board,
         time_limit: Optional[float] = None,
         game_history: Optional[List[int]] = None,
+        move_history: Optional[List[MoveEntry]] = None,
     ) -> Optional[Move4]:
         """Searcher 统一接口。"""
-        return self.get_best_move(board, time_limit=time_limit, game_history=game_history)
+        return self.get_best_move(
+            board,
+            time_limit=time_limit,
+            game_history=game_history,
+            move_history=move_history,
+        )
 
     def get_best_move(
         self,
@@ -1181,14 +1228,16 @@ class MCTSMinimaxAI:
         game_history: Optional[List[int]] = None,
         time_limit: Optional[float] = None,
         max_simulations: Optional[int] = None,
+        move_history: Optional[List[MoveEntry]] = None,
     ) -> Optional[Move4]:
         """执行 MCTS-Minimax 搜索并返回最佳走法。"""
         Evaluation._eval_cache.clear()
-        move_history: List[int] = [] if game_history is None else list(game_history)
+        hash_history: List[int] = [] if game_history is None else list(game_history)
+        root_mh = list(move_history) if move_history is not None else None
 
         # ── 开局库查询 ──
-        if len(move_history) < 30:
-            book_move = self._probe_opening_book(board, move_history)
+        if len(hash_history) < 30:
+            book_move = self._probe_opening_book(board, hash_history)
             if book_move is not None:
                 self.simulations_run = 0
                 self.last_stats = {
@@ -1210,12 +1259,12 @@ class MCTSMinimaxAI:
         effective_workers = self.workers
         if effective_workers <= 1 or ms < effective_workers * 10:
             child_stats, probe_stats = _run_single_mcts_minimax_tree(
-                board, ms, tl, seed_offset=0,
+                board, ms, tl, seed_offset=0, root_move_history=root_mh,
             )
             total_sims = sum(int(s["visits"]) for s in child_stats.values())
         else:
             child_stats, probe_stats = self._parallel_search(
-                board, tl, ms, effective_workers,
+                board, tl, ms, effective_workers, root_move_history=root_mh,
             )
             total_sims = sum(int(s["visits"]) for s in child_stats.values())
 
@@ -1307,6 +1356,7 @@ class MCTSMinimaxAI:
         time_limit: float,
         total_sims: int,
         num_workers: int,
+        root_move_history: Optional[List[MoveEntry]] = None,
     ) -> Tuple[Dict[Move4, Dict[str, float]], Dict[str, int]]:
         """多进程根节点并行搜索 + 合并。"""
         sims_per_worker = total_sims // num_workers
@@ -1322,7 +1372,8 @@ class MCTSMinimaxAI:
                         board_copy,
                         worker_sims,
                         time_limit,
-                        seed_offset=i * 1000,
+                        i * 1000,
+                        root_move_history,
                     )
                 )
             results = [f.result() for f in futures]

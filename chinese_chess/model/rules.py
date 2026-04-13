@@ -4,9 +4,9 @@
 - **棋子走法合法性判定**：每种棋子的几何规则、路径障碍检测
 - **将军检测**：反向射线法判断是否被将军，以及白脸将（将帅对面）判定
 - **走法生成**：
-  - ``get_all_moves`` / ``get_legal_moves``：完整合法走法（含将军/长将过滤）
+  - ``get_all_moves`` / ``get_legal_moves``：完整合法走法（自将、飞将等）
   - ``get_pseudo_legal_moves``：伪合法走法（仅几何规则，供 AI 搜索用）
-- **终局判定**：将被吃掉、无子可走（困毙/将死）、三次重复判和
+- **终局判定**：将被吃掉、无子可走（困毙/将死）、长将（第 2 次同形警告 / 第 3 次判负）
 
 注意：
 - 所有方法均为静态方法，避免有状态耦合
@@ -22,21 +22,24 @@ from .board import Board
 class MoveEntry(NamedTuple):
     """对局历史中的一条记录，与单步走子一一对应。
 
-    用于追踪局面哈希、行棋方及是否将军，支持长将违规检测和局面重复判定。
+    用于追踪局面哈希、行棋方及是否将军，支持长将警告与判负计数。
 
-    ``history[0]`` 为初始局面（走子前的占位项），其 ``mover`` 和
-    ``gave_check`` 均为 ``None``。
-    ``history[i]``（i >= 1）记录第 i 手走后的局面哈希、行棋方及是否将军。
+    ``history[0]`` 为初始局面（走子前的占位项），其 ``mover``、
+    ``gave_check``、``last_move`` 均为 ``None``。
+    ``history[i]``（i >= 1）记录第 i 手走后的局面哈希、行棋方、是否将军，
+    以及产生该局面所执行的四元组走法。
 
     Attributes:
         pos_hash: 走子后的 Zobrist 局面哈希值。
         mover: 该手的行棋方（``"red"`` 或 ``"black"``），
             初始占位项为 ``None``。
         gave_check: 该手走后是否将军对方，初始占位项为 ``None``。
+        last_move: 该手所执行的走法 ``(sr, sc, er, ec)``；初始占位为 ``None``。
     """
     pos_hash: int
     mover: Optional[str] = None
     gave_check: Optional[bool] = None
+    last_move: Optional[Tuple[int, int, int, int]] = None
 
 # ──────────────────────────────────────────────
 # 非法走法说明常量（供 GUI / Controller 向用户展示具体原因）
@@ -52,7 +55,7 @@ _MSG_NO_CAPTURE_KING = "老将不可被捕获，请通过走法形成将死"
 _MSG_KINGS_FACE = "王不见王"
 _MSG_IN_CHECK_STILL = "正在被将军，必须移动老将或吃掉将军棋子"
 _MSG_SELF_CHECK = "由于飞将或未解将，行动后将处于被将军状态"
-_MSG_LONG_CHECK = "长将违规，必须变招"
+_MSG_LONG_CHECK = "长将违规，必须变招"  # 保留供旧文案兼容；合法走子不再据此拦截
 
 
 class Rules:
@@ -61,9 +64,9 @@ class Rules:
     本类封装了中国象棋的全部规则逻辑，包括：
 
     - 棋子几何走法验证（将、士、象、马、车、炮、兵各有专用方法）
-    - 完整合法性校验（含将军检测、白脸将检测、长将违规检测）
+    - 完整合法性校验（含将军检测、白脸将检测；长将方负由终局判定）
     - 走法生成（完整合法走法与伪合法走法两种模式）
-    - 终局判定（将死、困毙、三次重复判和）
+    - 终局判定（将死、困毙、长将第三次判负）
 
     设计为纯静态类的原因：规则本身不持有状态，所有判定都基于传入的
     ``Board`` 对象进行，这使得规则逻辑可以在 Minimax、MCTS 等不同
@@ -111,60 +114,52 @@ class Rules:
         return sr, (sc + ec) // 2
 
     @staticmethod
-    def _long_check_violation(
-        mover: str,
-        history: List[MoveEntry],
-        board_after_move: Board,
-    ) -> Optional[str]:
-        """检测「长将」违规。
+    def _perpetual_offending_side_in_cycle(cycle: List[MoveEntry]) -> Optional[str]:
+        """循环节内是否单方「手手将军」：该方在节内每条 ``MoveEntry`` 均有 ``gave_check``。"""
+        reds = [e for e in cycle if e.mover == "red"]
+        blacks = [e for e in cycle if e.mover == "black"]
+        red_ok = bool(reds) and all(bool(e.gave_check) for e in reds)
+        black_ok = bool(blacks) and all(bool(e.gave_check) for e in blacks)
+        if red_ok and not black_ok:
+            return "red"
+        if black_ok and not red_ok:
+            return "black"
+        return None
 
-        长将规则：若本步将导致同一局面第三次出现，且从上一次相同局面到本步之间
-        该方每一手都在将军对方，则判定为长将违规（必须变招）。
+    @staticmethod
+    def perpetual_check_status(
+        board: Board, history: List[MoveEntry]
+    ) -> Tuple[str, Optional[str]]:
+        """长将状态：同形次数 + 单方持续 ``gave_check``。
 
-        检测流程：
-        1. 统计历史中与走后局面哈希相同的条目数，不足 2 次则不可能三次重复
-        2. 找到最后一次出现该哈希的索引，取其后续区间作为循环节
-        3. 检查循环节内该方的每一手是否全部为将军
-
-        本函数直接读取 ``MoveEntry.mover`` 字段判定行棋方，不依赖奇偶索引假设，
-        因此支持任意一方先走的非标准局面。
-
-        Args:
-            mover: 当前行棋方（``"red"`` 或 ``"black"``）。
-            history: 截止到走子前的完整对局历史（含初始局面占位项 ``history[0]``）。
-            board_after_move: 模拟执行本步后的棋盘状态（用于读取哈希与将军判定）。
+        - 统计 ``history`` 中 ``pos_hash ==`` 当前局面 Zobrist 的次数 ``c``。
+        - 取上一次同形下标 ``j``，循环节 ``history[j+1:]``；若节内仅一方
+          行棋且节节将军，则该方为 ``offending_side``。
+        - ``c == 1`` → ``("none", None)``；``c == 2`` 且满足上式 → ``warning``；
+          ``c >= 3`` 且满足 → ``forfeit``。
 
         Returns:
-            违规时返回 ``_MSG_LONG_CHECK`` 错误提示字符串，否则返回 ``None``。
+            ``("none" | "warning" | "forfeit", offending_side | None)``。
         """
-        h_new = board_after_move.zobrist_hash
-        n_prior = sum(1 for e in history if e.pos_hash == h_new)
-        if n_prior < 2:
-            return None
-        # 逆序扫描找到最后一次出现该哈希的索引，确定循环节起点
-        last_idx = -1
-        for i in range(len(history) - 1, -1, -1):
-            if history[i].pos_hash == h_new:
-                last_idx = i
-                break
-        # 循环节 = history[last_idx+1 :] 加上本步（尚未入栈）
-        sim_gave_check = Rules.is_king_in_check(
-            board_after_move, board_after_move.current_player
-        )
-        found = False
-        for entry in history[last_idx + 1:]:
-            if entry.mover != mover:
-                continue
-            found = True
-            if not entry.gave_check:
-                return None
-        # 本步（即将入栈的条目）也属于该方，需一并检查是否将军
-        found = True
-        if not sim_gave_check:
-            return None
-        if not found:
-            return None
-        return _MSG_LONG_CHECK
+        if len(history) < 2:
+            return "none", None
+        h_cur = board.zobrist_hash
+        if history[-1].pos_hash != h_cur:
+            return "none", None
+        indices = [i for i, e in enumerate(history) if e.pos_hash == h_cur]
+        c = len(indices)
+        if c < 2:
+            return "none", None
+        j = indices[-2]
+        cycle = history[j + 1 : len(history)]
+        if not cycle:
+            return "none", None
+        off = Rules._perpetual_offending_side_in_cycle(cycle)
+        if off is None:
+            return "none", None
+        if c == 2:
+            return "warning", off
+        return "forfeit", off
 
     @staticmethod
     def is_valid_move(
@@ -198,7 +193,8 @@ class Rules:
             check_legality: 为 ``False`` 时仅做几何与吃子规则校验，
                 不做将军/飞将模拟检测。
             history: 完整的对局历史记录（``List[MoveEntry]``），含初始局面占位项。
-                提供时额外检测「长将」违规。
+                保留参数以兼容调用方；长将判负由终局 ``winner(..., move_history=)``
+                统一处理，不在此拒绝走子。
 
         Returns:
             二元组 ``(是否合法, 错误原因)``。合法时返回 ``(True, "")``，
@@ -236,13 +232,6 @@ class Rules:
         captured = board.apply_move(start_row, start_col, end_row, end_col)
         kings_facing = Rules._jiang_face_to_face(board)
         still_in_check = Rules.is_king_in_check(board, player)
-        long_chk: Optional[str] = None
-        if (
-            history is not None
-            and not kings_facing
-            and not still_in_check
-        ):
-            long_chk = Rules._long_check_violation(player, history, board)
         board.undo_move(start_row, start_col, end_row, end_col, captured)
 
         if kings_facing:
@@ -251,8 +240,6 @@ class Rules:
             if was_in_check:
                 return False, _MSG_IN_CHECK_STILL
             return False, _MSG_SELF_CHECK
-        if long_chk is not None:
-            return False, long_chk
         return True, ""
 
     @staticmethod
@@ -930,16 +917,20 @@ class Rules:
         return not Rules.is_check(board, player) and not Rules.has_legal_moves(board, player)
 
     @staticmethod
-    def winner(board: Board):
+    def winner(
+        board: Board, move_history: Optional[List[MoveEntry]] = None
+    ) -> Optional[str]:
         """判断当前局面的胜者。
 
-        判负规则（符合中国象棋常用判负方式）：
+        判负规则：
         1. **将/帅被吃**：将/帅不在棋盘上的一方判负
-        2. **困毙/将死**：轮到走子但无任何合法走法的一方判负
-           （同时覆盖将死与困毙两种情况；与国际象棋 stalemate=draw 不同）
+        2. **长将第三次**：``perpetual_check_status`` 为 ``forfeit`` 时，
+           长将方判负（胜方为对手）
+        3. **困毙/将死**：轮到走子但无任何合法走法的一方判负
 
         Args:
             board: 当前棋盘状态。
+            move_history: 可选；完整 ``MoveEntry`` 列表（与控制器 ``history`` 一致）。
 
         Returns:
             胜者颜色字符串（``"red"`` 或 ``"black"``），
@@ -960,54 +951,20 @@ class Rules:
             # 理论上不应出现双方将帅同时消失，保守返回 None
             return None
 
-        # 第二步：检查困毙/将死——轮到走子但无合法走法的一方判负
+        if move_history is not None:
+            st, off = Rules.perpetual_check_status(board, move_history)
+            if st == "forfeit" and off is not None:
+                return "black" if off == "red" else "red"
+
+        # 第三步：困毙/将死——轮到走子但无合法走法的一方判负
         if not Rules.has_legal_moves(board, board.current_player):
             return "black" if board.current_player == "red" else "red"
 
         return None
 
     @staticmethod
-    def is_threefold_repetition_draw(board: Board, position_history: list) -> bool:
-        """判断当前局面是否因三次重复而判和。
-
-        简易防循环机制：同一局面（Zobrist 哈希）在对局历史中出现至少 3 次时判和。
-
-        注意：Minimax 在搜索路径上遇到重复局面时，使用
-        ``Evaluation.repetition_leaf_score`` 进行评分（大优时厌战、大劣时接受和棋），
-        与本终局层面的布尔判定相互独立。
-
-        Args:
-            board: 当前棋盘状态。
-            position_history: 对局历史中各局面的 Zobrist 哈希值列表。
-
-        Returns:
-            当前局面已出现 3 次或以上返回 ``True``，否则返回 ``False``。
-        """
-        if not position_history:
-            return False
-        h = board.zobrist_hash
-        return sum(1 for x in position_history if x == h) >= 3
-
-    @staticmethod
-    def is_game_over(board: Board, position_history: Optional[list] = None):
-        """判断当前对局是否已结束。
-
-        游戏结束条件（满足任一即可）：
-        1. 任意一方将/帅被吃或无子可走（由 ``winner()`` 检测）
-        2. 三次重复局面判和（可选，需提供 ``position_history``）
-
-        Args:
-            board: 当前棋盘状态。
-            position_history: 对局历史中各局面的 Zobrist 哈希值列表，
-                传入 ``None`` 时不检测三次重复。
-
-        Returns:
-            对局已结束返回 ``True``，否则返回 ``False``。
-        """
-        if Rules.winner(board) is not None:
-            return True
-        if position_history is not None and Rules.is_threefold_repetition_draw(
-            board, position_history
-        ):
-            return True
-        return False
+    def is_game_over(
+        board: Board, move_history: Optional[List[MoveEntry]] = None
+    ) -> bool:
+        """若 ``winner(...)`` 已能判定胜负（含长将判负），返回 ``True``。"""
+        return Rules.winner(board, move_history) is not None

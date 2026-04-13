@@ -18,9 +18,9 @@ from chinese_chess.algorithm.mcts import MCTSAI
 from chinese_chess.algorithm.mcts_minimax import MCTSMinimaxAI
 from chinese_chess.algorithm.random_ai import RandomAI
 from chinese_chess.model.board import Board
-from chinese_chess.model.rules import Rules
+from chinese_chess.model.rules import MoveEntry, Rules
 
-MAX_MOVES = 150  # 单方步数上限（着法数），超过判和
+MAX_MOVES = 150  # 着法数上限，超过则停止对局（结果 None）
 
 _AI_KIND_ALLOWED = frozenset({"minimax", "mcts", "mcts_minimax", "random"})
 _LEGACY_TO_MCTS_MINIMAX = frozenset({"hybrid", "mcts_minmax"})
@@ -145,6 +145,7 @@ def play_one_game(
     """
     board = Board()
     history_hashes = [board.zobrist_hash]
+    move_hist: list = [MoveEntry(pos_hash=board.zobrist_hash)]
     if hasattr(red_ai, "reset_benchmark_stats"):
         red_ai.reset_benchmark_stats()
     if hasattr(black_ai, "reset_benchmark_stats"):
@@ -152,8 +153,8 @@ def play_one_game(
     plies = 0
 
     while plies < MAX_MOVES:
-        if Rules.is_game_over(board, position_history=history_hashes):
-            w = Rules.winner(board)
+        if Rules.is_game_over(board, move_history=move_hist):
+            w = Rules.winner(board, move_history=move_hist)
             return (w, plies)
 
         if board.current_player == "red":
@@ -164,19 +165,34 @@ def play_one_game(
             agg_key = "black"
 
         if agent is None:
-            w = Rules.winner(board)
+            w = Rules.winner(board, move_history=move_hist)
             return (w, plies)
 
-        move = agent.get_best_move(board, game_history=history_hashes, time_limit=time_limit)
+        move = agent.get_best_move(
+            board,
+            game_history=history_hashes,
+            time_limit=time_limit,
+            move_history=move_hist,
+        )
         if move is None:
-            w = Rules.winner(board)
+            w = Rules.winner(board, move_history=move_hist)
             return (w, plies)
 
         if agg is not None:
             _tally_last_stats(agent, agg[agg_key])
 
         sr, sc, er, ec = move
+        mover = board.current_player
         board.apply_move(sr, sc, er, ec)
+        opp = board.current_player
+        move_hist.append(
+            MoveEntry(
+                pos_hash=board.zobrist_hash,
+                mover=mover,
+                gave_check=Rules.is_king_in_check(board, opp),
+                last_move=(sr, sc, er, ec),
+            )
+        )
         history_hashes.append(board.zobrist_hash)
         plies += 1
 

@@ -50,10 +50,10 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from chinese_chess.model.board import Board
-from chinese_chess.model.rules import Rules
+from chinese_chess.model.rules import MoveEntry, Rules
 
 
 class Evaluation:
@@ -368,29 +368,34 @@ class Evaluation:
     _ANTI_TRADE_COEFF = 0.018
 
     # ════════════════════════════════════════════════════════════
-    #  7. 辅助方法——重复局面评估
+    #  7. 辅助方法——重复局面 / 长将判负 叶评估
     # ════════════════════════════════════════════════════════════
+
+    _PERPETUAL_FORFEIT_LEAF: float = 10000.0
+
+    @staticmethod
+    def perpetual_forfeit_leaf_score(
+        board: Board, history: List[MoveEntry]
+    ) -> Optional[float]:
+        """``perpetual_check_status == forfeit`` 时返回终端型分数（行棋方视角）。"""
+        st, _off = Rules.perpetual_check_status(board, history)
+        if st != "forfeit":
+            return None
+        w = Rules.winner(board, history)
+        if w is None:
+            return None
+        cp = board.current_player
+        mag = Evaluation._PERPETUAL_FORFEIT_LEAF
+        return mag if w == cp else -mag
 
     @staticmethod
     def repetition_leaf_score(board: Board) -> float:
-        """计算搜索中遇到重复局面时的叶子节点评估分。
+        """计算搜索中遇到「路径内局面哈希重复」且未触发长将判负时的叶分启发值。
 
-        功能说明：
-            当 Minimax 搜索检测到当前路径将重演已出现过的局面时，调用
-            此函数获取一个惩罚/接受分值，而非继续深搜。其策略为：
-            - 己方大劣（评估 < -200）时接受和棋，返回 0。
-            - 己方领先（评估 > 50）时厌战，返回负分以惩罚重复。
-            - 其余情况返回 0（不鼓励也不惩罚）。
-
-            这与 ``Rules.is_threefold_repetition_draw``（三次重复判和的
-            布尔终局判定）不同，本函数仅用于搜索树内部的启发式估值。
-
-        Args:
-            board: 当前棋盘局面。
-
-        Returns:
-            叶子节点的评估分（浮点数）。大优时为负值（惩罚重复），
-            大劣时为 0（接受和棋）。
+        当 Minimax 发现当前 Zobrist 已在 ``history_hashes`` 路径上出现过
+        （排除叶尾），且 ``perpetual_forfeit_leaf_score`` 未命中时调用。
+        策略：大劣时返回 0，大优时略惩罚重复（鼓励变着），与终局「三次重复
+        判和」无关（该项目已移除该终局规则）。
         """
         e = Evaluation.evaluate(board)
         if e < -200:

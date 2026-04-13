@@ -77,11 +77,11 @@ class AgentProtocol:
     """AI 代理接口协议（鸭子类型约定，无需强制继承）。
 
     所有 AI 实现应至少提供以下两个方法之一：
-        - ``choose_move(board, time_limit=..., game_history=...) -> move | None``
-        - ``get_best_move(board, time_limit=..., game_history=...) -> move | None``
+        - ``choose_move(board, time_limit=..., game_history=..., move_history=...)``
+        - ``get_best_move(board, time_limit=..., game_history=..., move_history=...)``
 
-    其中 ``game_history`` 为可选参数，传入从开局至当前局面的 Zobrist 哈希列表，
-    用于支持重复局面检测等功能。
+    ``game_history``：Zobrist 哈希列表（开局库、路径重复启发等）。
+    ``move_history``：``MoveEntry`` 列表，与 ``Rules.perpetual_check_status`` 一致。
     """
 
     def choose_move(self, board: Board, time_limit: Optional[float] = None, **kwargs):  # pragma: no cover
@@ -130,6 +130,9 @@ class MoveOutcome:
         captured: 本步吃掉的棋子对象，未吃子则为 ``None``。
         game_over: 仅当 ``ok=True`` 时有意义——本步执行后局面是否已终局。
         winner: 终局时的胜者颜色（``'red'`` / ``'black'``），和棋时为 ``None``。
+        perpetual_warning: 本步后触发长将第二次同形警告（对局继续）。
+        perpetual_forfeit: 本步后长将第三次判负导致终局。
+        perpetual_offender: 长将方颜色（``warning`` / ``forfeit`` 时有效）。
     """
 
     ok: bool
@@ -137,6 +140,9 @@ class MoveOutcome:
     captured: object = None
     game_over: bool = False
     winner: Optional[str] = None
+    perpetual_warning: bool = False
+    perpetual_forfeit: bool = False
+    perpetual_offender: Optional[str] = None
 
 
 class GameController:
@@ -266,15 +272,28 @@ class GameController:
         captured = self.board.apply_move(sr, sc, er, ec)
         opp = self.board.current_player
         gave_check = Rules.is_king_in_check(self.board, opp)
-        self.history.append(MoveEntry(
-            pos_hash=self.board.zobrist_hash,
-            mover=mover,
-            gave_check=gave_check,
-        ))
-        pos_hashes = self.game_history_hashes
-        over = Rules.is_game_over(self.board, position_history=pos_hashes)
-        win: Optional[str] = Rules.winner(self.board) if over else None
-        return MoveOutcome(ok=True, captured=captured, game_over=over, winner=win)
+        self.history.append(
+            MoveEntry(
+                pos_hash=self.board.zobrist_hash,
+                mover=mover,
+                gave_check=gave_check,
+                last_move=(sr, sc, er, ec),
+            )
+        )
+        pst, poff = Rules.perpetual_check_status(self.board, self.history)
+        p_warn = pst == "warning"
+        p_ff = pst == "forfeit"
+        over = Rules.is_game_over(self.board, move_history=self.history)
+        win: Optional[str] = Rules.winner(self.board, self.history) if over else None
+        return MoveOutcome(
+            ok=True,
+            captured=captured,
+            game_over=over,
+            winner=win,
+            perpetual_warning=p_warn,
+            perpetual_forfeit=p_ff,
+            perpetual_offender=poff if pst != "none" else None,
+        )
 
     def undo_move(self, move: Tuple[int, int, int, int], captured) -> None:
         """撤销一步走子，恢复棋盘和历史到上一状态。
@@ -294,7 +313,7 @@ class GameController:
         Returns:
             bool: 终局返回 ``True``（含将死、困毙、和棋等情况）。
         """
-        return Rules.is_game_over(self.board, position_history=self.game_history_hashes)
+        return Rules.is_game_over(self.board, move_history=self.history)
 
 
     def winner(self) -> Optional[str]:
@@ -304,7 +323,7 @@ class GameController:
             Optional[str]: 胜者颜色字符串 ``'red'`` / ``'black'``，
             和棋或未终局时返回 ``None``。
         """
-        return Rules.winner(self.board)
+        return Rules.winner(self.board, move_history=self.history)
 
     def current_result(self) -> dict:
         """获取当前对局状态摘要（供 GUI 状态栏显示）。
@@ -366,10 +385,21 @@ class GameController:
             return MoveOutcome(ok=False, message="human turn")
 
         gh = list(self.game_history_hashes)
+        mh = list(self.history)
         if hasattr(agent, "choose_move"):
-            move = agent.choose_move(self.board, time_limit=time_limit, game_history=gh)
+            move = agent.choose_move(
+                self.board,
+                time_limit=time_limit,
+                game_history=gh,
+                move_history=mh,
+            )
         else:
-            move = agent.get_best_move(self.board, time_limit=time_limit, game_history=gh)
+            move = agent.get_best_move(
+                self.board,
+                time_limit=time_limit,
+                game_history=gh,
+                move_history=mh,
+            )
         if move is None:
             # 无合法走法：困毙/将死，胜负由 Rules.winner 判定
             return MoveOutcome(ok=False, message="ai has no legal moves")

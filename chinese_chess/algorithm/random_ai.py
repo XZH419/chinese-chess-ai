@@ -39,7 +39,7 @@ class RandomAI:
         self,
         board,
         time_limit: Optional[float] = None,
-        **kwargs,
+        **kwargs: object,
     ) -> Optional[Tuple[int, int, int, int]]:
         """Searcher 统一接口：为当前行棋方随机选择一步合法走法。
 
@@ -74,4 +74,4 @@ class RandomAI:
         Returns:
             随机选中的走法四元组，或 ``None``。
         """
-        return self.choose_move(board, time_limit=time_limit)
+        return self.choose_move(board, time_limit=time_limit, **kwargs)

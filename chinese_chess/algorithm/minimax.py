@@ -33,7 +33,7 @@ import random
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from chinese_chess.model.rules import Rules
+from chinese_chess.model.rules import MoveEntry, Rules
 
 from .evaluation import Evaluation
 from .search_move_helpers import (
@@ -183,6 +183,8 @@ class MinimaxAI:
         # 重复局面检测：保存"从根到当前节点"的 Zobrist 哈希路径，
         # 可叠加外部传入的 game_history 以覆盖整局历史。
         self.history_hashes: List[int] = []
+        # 与 history_hashes 同步的 MoveEntry 栈，供「无获益纯长将」叶评估使用
+        self._move_history_stack: List[MoveEntry] = []
         # 历史启发表：Beta 截断着法按 depth² 加权累加，跨着法积累经验。
         # 与置换表不同，此表不在每步根搜索清空，而是通过老化机制衰减。
         self.history_table: Dict[Tuple[int, int, int, int], int] = {}
@@ -483,6 +485,7 @@ class MinimaxAI:
         board,
         time_limit: Optional[float] = 10.0,
         game_history: Optional[List[int]] = None,
+        move_history: Optional[List[MoveEntry]] = None,
     ) -> Optional[Tuple[int, int, int, int]]:
         """外部搜索接口：为当前行棋方选择一步最佳着法。
 
@@ -492,19 +495,26 @@ class MinimaxAI:
         Args:
             board: 当前棋盘对象。
             time_limit: 搜索时限（秒），传递给 get_best_move。
-            game_history: 从开局至今的 Zobrist 哈希序列，用于重复局面检测。
+            game_history: 从开局至今的 Zobrist 哈希序列，用于路径重复检测。
+            move_history: 可选；控制器 ``MoveEntry`` 链，与长将判负叶评估对齐。
 
         Returns:
             最佳着法四元组 (起始行, 起始列, 目标行, 目标列)；
             无合法着法时返回 None。
         """
-        return self.get_best_move(board, game_history=game_history, time_limit=time_limit)
+        return self.get_best_move(
+            board,
+            game_history=game_history,
+            move_history=move_history,
+            time_limit=time_limit,
+        )
 
     def get_best_move(
         self,
         board,
         game_history: Optional[List[int]] = None,
         time_limit: Optional[float] = 10.0,
+        move_history: Optional[List[MoveEntry]] = None,
     ):
         """迭代加深搜索主入口：从深度 1 到 self.depth 逐层搜索，选择最佳着法。
 
@@ -526,6 +536,8 @@ class MinimaxAI:
             board: 当前棋盘对象。
             game_history: 从开局至今的 Zobrist 哈希序列（可选），
                 用于扩展路径内重复局面检测的覆盖范围。
+            move_history: 可选；完整 ``MoveEntry`` 列表（须与当前 ``board`` 一致），
+                用于与终局规则一致的「无获益纯长将」叶节点评分。
             time_limit: 搜索时限（秒），None 表示不限时。
 
         Returns:
@@ -533,8 +545,8 @@ class MinimaxAI:
             无合法着法时返回 None（被将死或困毙）。
         """
         Evaluation._eval_cache.clear()
-        move_history: List[int] = [] if game_history is None else list(game_history)
-        if len(move_history) < 30:
+        hash_history: List[int] = [] if game_history is None else list(game_history)
+        if len(hash_history) < 30:
             zkey = board.zobrist_hash
             book_moves = OPENING_BOOK.get(zkey)
             if book_moves is None:
@@ -543,7 +555,7 @@ class MinimaxAI:
                 alt = OPENING_BOOK.get(zm)
                 if alt is not None:
                     book_moves = [mirror_move(m) for m in alt]
-            if book_moves is None and len(move_history) == 0:
+            if book_moves is None and len(hash_history) == 0:
                 keys = list(OPENING_BOOK.keys())
                 disp = keys if len(keys) <= 48 else keys[:24] + ["..."] + keys[-16:]
                 print(
@@ -584,12 +596,19 @@ class MinimaxAI:
 
         # 外部可传入从开局到当前局面的完整哈希链，
         # 若末尾已是当前局面则不再重复追加
-        self.history_hashes = list(move_history)
+        self.history_hashes = list(hash_history)
         if not self.history_hashes or self.history_hashes[-1] != board.zobrist_hash:
             self.history_hashes.append(board.zobrist_hash)
 
+        if move_history is not None and (
+            len(move_history) > 0 and move_history[-1].pos_hash == board.zobrist_hash
+        ):
+            self._move_history_stack = list(move_history)
+        else:
+            self._move_history_stack = [MoveEntry(pos_hash=board.zobrist_hash)]
+
         global_best_move: Optional[Tuple[int, int, int, int]] = None
-        gh_len = len(move_history)
+        gh_len = len(hash_history)
         # 中局阶段（手数 > 20）关闭根节点随机化，切换为纯确定性搜索
         is_midgame = gh_len > 20
 
@@ -640,6 +659,15 @@ class MinimaxAI:
                         continue
                     captured, _ = applied
                     self.history_hashes.append(board.zobrist_hash)
+                    opp = board.current_player
+                    self._move_history_stack.append(
+                        MoveEntry(
+                            pos_hash=board.zobrist_hash,
+                            mover=mover,
+                            gave_check=Rules.is_king_in_check(board, opp),
+                            last_move=move,
+                        )
+                    )
 
                     has_legal_move = True
                     # 搜索下界快照：与容差/记录用的「业务 alpha」解耦，
@@ -657,6 +685,7 @@ class MinimaxAI:
                         )
                     finally:
                         self.history_hashes.pop()
+                        self._move_history_stack.pop()
                         board.undo_move(*move, captured)
 
                     if score > best_score_this_depth:
@@ -754,29 +783,20 @@ class MinimaxAI:
         return global_best_move
 
     def _is_repeated(self, board, *, skip_rep_count: bool = False) -> Optional[float]:
-        """检测当前局面是否重复出现，并返回相应的评估分数。
-
-        实现两级重复检测机制：
-        1. **路径内重复**：当前局面的 Zobrist 哈希在搜索路径 history_hashes
-           中已出现过（排除末尾自身），视为循环局面，返回重复叶节点分数。
-        2. **全局三次重复**：board 自身维护的重复计数器达到 3 次时，
-           根据是否被将军返回不同分数——被将时对手违规（长将），己方得利。
+        """路径重复与长将第三次判负叶分（``Rules.perpetual_check_status``）。
 
         Args:
-            board: 当前棋盘对象。
-            skip_rep_count: 若为 True 则跳过全局重复计数检测。
-                空步剪枝子树中使用此标志，因为空步产生的"虚拟局面"
-                不应计入实际重复次数。
-
-        Returns:
-            检测到重复时返回对应的评估分数；未重复时返回 None。
+            skip_rep_count: 空步剪枝子树为 True 时跳过长将叶判定（虚拟停一手，
+                ``_move_history_stack`` 与棋盘不同步）。
         """
+        if not skip_rep_count:
+            pf = Evaluation.perpetual_forfeit_leaf_score(
+                board, self._move_history_stack
+            )
+            if pf is not None:
+                return pf
         if self.history_hashes and board.zobrist_hash in self.history_hashes[:-1]:
             return Evaluation.repetition_leaf_score(board)
-        if not skip_rep_count and board.get_repetition_count() >= 3:
-            if Rules.is_king_in_check(board, board.current_player):
-                return 100000.0
-            return 10.0
         return None
 
     def _quiescence_search(
@@ -854,6 +874,15 @@ class MinimaxAI:
                 continue
             captured, _ = applied
             self.history_hashes.append(board.zobrist_hash)
+            opp = board.current_player
+            self._move_history_stack.append(
+                MoveEntry(
+                    pos_hash=board.zobrist_hash,
+                    mover=mover,
+                    gave_check=Rules.is_king_in_check(board, opp),
+                    last_move=move,
+                )
+            )
 
             try:
                 score = -self._quiescence_search(
@@ -861,6 +890,7 @@ class MinimaxAI:
                 )
             finally:
                 self.history_hashes.pop()
+                self._move_history_stack.pop()
                 board.undo_move(*move, captured)
 
             if score >= beta:
@@ -1009,6 +1039,15 @@ class MinimaxAI:
                 continue
             captured, opp_in_check = applied
             self.history_hashes.append(board.zobrist_hash)
+            opp = board.current_player
+            self._move_history_stack.append(
+                MoveEntry(
+                    pos_hash=board.zobrist_hash,
+                    mover=mover,
+                    gave_check=Rules.is_king_in_check(board, opp),
+                    last_move=move,
+                )
+            )
             has_legal_move = True
 
             # ---- 将军延伸 ----
@@ -1071,6 +1110,7 @@ class MinimaxAI:
                         )
             finally:
                 self.history_hashes.pop()
+                self._move_history_stack.pop()
                 board.undo_move(*move, captured)
 
             is_first_move = False

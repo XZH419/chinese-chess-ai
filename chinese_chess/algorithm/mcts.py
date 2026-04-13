@@ -43,7 +43,7 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from chinese_chess.model.board import Board
-from chinese_chess.model.rules import Rules
+from chinese_chess.model.rules import MoveEntry, Rules
 
 from .evaluation import Evaluation
 from .search_move_helpers import (
@@ -72,6 +72,21 @@ _ROLL_PREFER_AGGRESSIVE = 0.36
 
 # 走法四元组：(起始行, 起始列, 目标行, 目标列)
 Move4 = Tuple[int, int, int, int]
+
+
+def _append_path_move_entry(
+    entry_stack: List[MoveEntry], board: Board, move: Move4, mover: str
+) -> None:
+    """在 ``board`` 已执行 ``move`` 之后，追加对应的 ``MoveEntry``。"""
+    opp = board.current_player
+    entry_stack.append(
+        MoveEntry(
+            pos_hash=board.zobrist_hash,
+            mover=mover,
+            gave_check=Rules.is_king_in_check(board, opp),
+            last_move=move,
+        )
+    )
 
 
 def _move_gives_check(
@@ -350,6 +365,7 @@ def _run_single_mcts_tree(
     max_simulations: int,
     time_limit: float,
     seed_offset: int = 0,
+    root_move_history: Optional[List[MoveEntry]] = None,
 ) -> Dict[Move4, Dict[str, float]]:
     """在独立进程/线程中执行一棵完整的 MCTS-RAVE-DAG 搜索树。
 
@@ -394,6 +410,14 @@ def _run_single_mcts_tree(
         if time.time() - t0 >= time_limit:
             break
 
+        if root_move_history is not None and (
+            len(root_move_history) > 0
+            and root_move_history[-1].pos_hash == board.zobrist_hash
+        ):
+            entry_stack: List[MoveEntry] = list(root_move_history)
+        else:
+            entry_stack = [MoveEntry(pos_hash=board.zobrist_hash)]
+
         node = root
         path: List[MCTSNode] = [root]
 
@@ -404,7 +428,9 @@ def _run_single_mcts_tree(
             log_n = math.log(node.visits) if node.visits > 0 else 0.0
             # 从边（字典键）读取走法，而非子节点属性——DAG 安全
             edge_move, next_node = node.best_child_ucb(log_n)
+            mover_sel = board.current_player
             captured = board.apply_move(*edge_move)
+            _append_path_move_entry(entry_stack, board, edge_move, mover_sel)
             move_stack.append((edge_move, captured))
             path.append(next_node)
             node = next_node
@@ -414,7 +440,9 @@ def _run_single_mcts_tree(
         node.ensure_moves(board, gives_check_cache)
         expanded = False
         if node.untried_moves:
-            result = _expand_one(board, node, move_stack, tt, gives_check_cache)
+            result = _expand_one(
+                board, node, move_stack, entry_stack, tt, gives_check_cache
+            )
             if result is not None:
                 _exp_move, child = result
                 path.append(child)
@@ -423,12 +451,19 @@ def _run_single_mcts_tree(
 
         if not expanded and not node.children and node.visits > 0:
             # 所有走法均不合法（被将死），直接评估终局分数
-            sim_result, red_moves, black_moves = _terminal_score(board, root_player), set(), set()
+            sim_result = _terminal_score(
+                board, root_player, move_history=entry_stack
+            )
+            red_moves = set()
+            black_moves = set()
         else:
             # ── 模拟 (Simulation / Rollout) ──
             # 从当前节点开始，进行一次轻量级随机对弈（伪合法走法 + 截断 + 兜底估分）。
             sim_result, red_moves, black_moves = _simulate(
-                board, root_player, gives_check_cache=gives_check_cache,
+                board,
+                root_player,
+                gives_check_cache=gives_check_cache,
+                path_history=entry_stack,
             )
 
         # ── 反向传播 (Backpropagation) ──
@@ -439,6 +474,7 @@ def _run_single_mcts_tree(
         # 还原棋盘：按 LIFO 顺序逐步 undo_move，恢复到根节点状态
         while move_stack:
             mv, cap = move_stack.pop()
+            entry_stack.pop()
             board.undo_move(*mv, cap)
 
     # 收集根节点下所有子节点的统计数据，返回给调用方
@@ -460,6 +496,7 @@ def _expand_one(
     board: Board,
     node: MCTSNode,
     move_stack: List[Tuple[Move4, Any]],
+    entry_stack: List[MoveEntry],
     tt: Dict[int, MCTSNode],
     gives_check_cache: MoveGivesCheckCache,
 ) -> Optional[Tuple[Move4, MCTSNode]]:
@@ -498,6 +535,7 @@ def _expand_one(
             continue
         captured, _ = applied
         move_stack.append((move, captured))
+        _append_path_move_entry(entry_stack, board, move, mover)
         child_hash = board.zobrist_hash
         # 查置换表：不同走法序列可能到达相同的棋盘状态（Zobrist Hash 相同），
         # 此时直接复用已有节点，将搜索树转为有向无环图 (DAG)，
@@ -521,6 +559,7 @@ def _simulate(
     root_player: str,
     *,
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
+    path_history: Optional[List[MoveEntry]] = None,
 ) -> Tuple[float, Set[Move4], Set[Move4]]:
     """轻量级伪合法模拟（Lightweight Pseudo-legal Rollout）。
 
@@ -542,6 +581,7 @@ def _simulate(
         board: 当前棋盘（会被 copy 后在副本上模拟，不影响原盘）。
         root_player: MCTS 搜索的根节点行棋方（用于确定胜负视角）。
         gives_check_cache: 可选；与当前搜索树共用，加速 rollout 内 ``_move_gives_check``。
+        path_history: 到达当前节点前的 ``MoveEntry`` 链（与 ``board`` 一致）。
 
     Returns:
         ``(result, red_moves, black_moves)``——
@@ -553,10 +593,22 @@ def _simulate(
     rollout_limit = _dynamic_rollout_limit(sim_board.piece_count())
     red_moves: Set[Move4] = set()
     black_moves: Set[Move4] = set()
+    hist: List[MoveEntry] = (
+        list(path_history)
+        if path_history is not None
+        else [MoveEntry(pos_hash=sim_board.zobrist_hash)]
+    )
+    if not hist or hist[-1].pos_hash != sim_board.zobrist_hash:
+        hist = [MoveEntry(pos_hash=sim_board.zobrist_hash)]
 
     for _ in range(rollout_limit):
         cp = sim_board.current_player
         opp = "black" if cp == "red" else "red"
+
+        st_pf, _off_pf = Rules.perpetual_check_status(sim_board, hist)
+        if st_pf == "forfeit" and _off_pf is not None:
+            w_pf = "black" if _off_pf == "red" else "red"
+            return (1.0 if w_pf == root_player else 0.0), red_moves, black_moves
 
         # O(1) 终局检测：前一步行棋方若送将 / 未解将，
         # 对方老将此刻处于被将军状态 → 当前行棋方可"吃将"获胜
@@ -575,6 +627,7 @@ def _simulate(
             king_cap = _find_king_capture(sim_board, cp, b_grid, okr, okc)
             if king_cap is not None:
                 sim_board.apply_move(*king_cap)
+                _append_path_move_entry(hist, sim_board, king_cap, cp)
                 if cp == "red":
                     red_moves.add(king_cap)
                 else:
@@ -585,6 +638,8 @@ def _simulate(
         chosen, _ = _pick_rollout_move_fast(
             sim_board, moves, b_grid, gives_check_cache=gives_check_cache,
         )
+        # ``_pick_rollout_move_fast`` 内部已 ``apply_move``
+        _append_path_move_entry(hist, sim_board, chosen, cp)
         if cp == "red":
             red_moves.add(chosen)
         else:
@@ -739,17 +794,14 @@ def _eval_to_winrate(board: Board, root_player: str) -> float:
     return 1.0 / (1.0 + math.exp(-raw / _SCORE_SCALE))
 
 
-def _terminal_score(board: Board, root_player: str) -> float:
-    """评估已确认的终局局面（被将死 / 和棋 / 认输）的分数。
-
-    Args:
-        board: 终局棋盘。
-        root_player: MCTS 根节点的行棋方。
-
-    Returns:
-        1.0（root_player 获胜）、0.0（root_player 落败）、0.5（和棋）。
-    """
-    w = Rules.winner(board)
+def _terminal_score(
+    board: Board,
+    root_player: str,
+    *,
+    move_history: Optional[List[MoveEntry]] = None,
+) -> float:
+    """评估已确认的终局局面（将死 / 困毙 / 长将判负等）的胜率分。"""
+    w = Rules.winner(board, move_history)
     if w == root_player:
         return 1.0
     if w is not None:
@@ -862,6 +914,7 @@ class MCTSAI:
         board: Board,
         time_limit: Optional[float] = None,
         game_history: Optional[List[int]] = None,
+        move_history: Optional[List[MoveEntry]] = None,
     ) -> Optional[Move4]:
         """Searcher 统一接口：为当前行棋方选择一步最佳走法。
 
@@ -873,7 +926,12 @@ class MCTSAI:
         Returns:
             最佳走法四元组，或 ``None``（无合法走法）。
         """
-        return self.get_best_move(board, time_limit=time_limit, game_history=game_history)
+        return self.get_best_move(
+            board,
+            time_limit=time_limit,
+            game_history=game_history,
+            move_history=move_history,
+        )
 
     def get_best_move(
         self,
@@ -881,6 +939,7 @@ class MCTSAI:
         game_history: Optional[List[int]] = None,
         time_limit: Optional[float] = None,
         max_simulations: Optional[int] = None,
+        move_history: Optional[List[MoveEntry]] = None,
     ) -> Optional[Move4]:
         """执行 MCTS-RAVE 搜索并返回最佳走法。
 
@@ -896,11 +955,12 @@ class MCTSAI:
         Returns:
             最佳走法四元组，或 ``None``（无合法走法）。
         """
-        move_history: List[int] = [] if game_history is None else list(game_history)
+        hash_history: List[int] = [] if game_history is None else list(game_history)
+        root_mh = list(move_history) if move_history is not None else None
 
         # ── 开局库拦截 ──
-        if len(move_history) < 30:
-            book_move = self._probe_opening_book(board, move_history)
+        if len(hash_history) < 30:
+            book_move = self._probe_opening_book(board, hash_history)
             if book_move is not None:
                 self.simulations_run = 0
                 self.last_stats = {
@@ -922,13 +982,21 @@ class MCTSAI:
         effective_workers = self.workers
         # 模拟次数太少时，进程启动开销大于收益，退化为单进程
         if effective_workers <= 1 or ms < effective_workers * 10:
-            merged = _run_single_mcts_tree(board, ms, tl, seed_offset=0)
+            merged = _run_single_mcts_tree(
+                board, ms, tl, seed_offset=0, root_move_history=root_mh
+            )
             total_sims = sum(int(s["visits"]) for s in merged.values())
         else:
             sims_per_worker = ms // effective_workers
             remainder = ms % effective_workers
-            merged = self._parallel_search(board, tl, sims_per_worker,
-                                           remainder, effective_workers)
+            merged = self._parallel_search(
+                board,
+                tl,
+                sims_per_worker,
+                remainder,
+                effective_workers,
+                root_move_history=root_mh,
+            )
             total_sims = sum(int(s["visits"]) for s in merged.values())
 
         elapsed = time.time() - t0
@@ -1021,6 +1089,7 @@ class MCTSAI:
         sims_per_worker: int,
         remainder: int,
         num_workers: int,
+        root_move_history: Optional[List[MoveEntry]] = None,
     ) -> Dict[Move4, Dict[str, float]]:
         """多进程根节点并行搜索并合并结果。
 
@@ -1049,7 +1118,8 @@ class MCTSAI:
                         board_copy,
                         worker_sims,
                         time_limit,
-                        seed_offset=i * 1000,
+                        i * 1000,
+                        root_move_history,
                     )
                 )
             results = [f.result() for f in futures]

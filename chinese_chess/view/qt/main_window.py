@@ -137,6 +137,7 @@ class AIMoveThread(QThread):
         time_limit_s: int,
         run_id: int,
         game_history_hashes: Optional[list] = None,
+        move_history: Optional[list] = None,
     ):
         """初始化 AI 计算线程。
 
@@ -149,7 +150,8 @@ class AIMoveThread(QThread):
             ai_color: AI 所执颜色（``'red'`` 或 ``'black'``）。
             time_limit_s: 思考时间上限（秒）。
             run_id: 本次计算的唯一标识，用于主线程过滤过期信号。
-            game_history_hashes: 从开局至今的 Zobrist 哈希列表，用于重复局面检测。
+            game_history_hashes: 从开局至今的 Zobrist 哈希列表（开局库等）。
+            move_history: 控制器 ``MoveEntry`` 列表副本，与终局长将判负规则对齐。
         """
         super().__init__()
         self._ai = ai
@@ -158,6 +160,7 @@ class AIMoveThread(QThread):
         self._time_limit_s = time_limit_s
         self._run_id = run_id
         self._game_history_hashes = list(game_history_hashes) if game_history_hashes else []
+        self._move_history = list(move_history) if move_history else []
 
     def run(self) -> None:
         """线程执行体：在纯数据上计算走法，不触碰任何 Qt 对象。
@@ -172,6 +175,7 @@ class AIMoveThread(QThread):
                     self._board,
                     time_limit=self._time_limit_s,
                     game_history=self._game_history_hashes,
+                    move_history=self._move_history,
                 )
             else:
                 self._board.current_player = self._ai_color
@@ -179,6 +183,7 @@ class AIMoveThread(QThread):
                     self._board,
                     time_limit=self._time_limit_s,
                     game_history=self._game_history_hashes,
+                    move_history=self._move_history,
                 )
             print("[AI Thread] finished, emitting signal")
             stats = getattr(self._ai, "last_stats", None)
@@ -443,7 +448,8 @@ class MainWindow(QMainWindow):
 
     Attributes:
         controller: 游戏控制器实例。
-        human_color: 当前 Player（内部 ``human``）所执颜色。
+        human_color: 人机模式下人类所执色（红/黑）；双方均为 Player 时可为 ``None``，
+            走子以 ``board.current_player`` 为准。
         is_game_running: 是否处于对局进行中状态。
     """
 
@@ -842,12 +848,14 @@ class MainWindow(QMainWindow):
         return f"红方 · {r} vs 黑方 · {b}"
 
     def _sync_human_color_from_controller(self) -> None:
-        """根据控制器中红黑双方配置推断 Player（human）所执颜色。"""
+        """根据控制器推断人机模式下人类所执色；双 Player 时为 ``None``。"""
         r, b = self.controller.red_agent, self.controller.black_agent
         if r is None and b is not None:
             self.human_color = "red"
         elif b is None and r is not None:
             self.human_color = "black"
+        elif r is None and b is None:
+            self.human_color = None
         else:
             self.human_color = "red"
 
@@ -891,14 +899,29 @@ class MainWindow(QMainWindow):
         if not outcome.ok:
             return
         self._refresh_status()
+        if outcome.perpetual_warning and not outcome.game_over:
+            off = outcome.perpetual_offender
+            who = "红方" if off == "red" else "黑方" if off else "某方"
+            wtxt = f"⚠ 长将警告：{who}持续将军；第三次出现相同局面将判负。"
+            self.append_log(wtxt)
+            self.status_label.setText(wtxt)
+
         if outcome.game_over:
             self._run_id += 1
+            if outcome.perpetual_forfeit:
+                side = "红" if outcome.winner == "red" else "黑"
+                msg = f"游戏结束：长将判负，{side}方获胜！"
+                self.append_log(msg)
+                self.append_log("==========================")
+                self.status_label.setText(msg)
+                self._game_over_ui()
+                return
             if outcome.winner == "red":
                 msg = "游戏结束：红方获胜！"
             elif outcome.winner == "black":
                 msg = "游戏结束：黑方获胜！"
             else:
-                msg = "游戏结束：和棋（死局或三次重复）！"
+                msg = "游戏结束：和棋（死局）！"
             self.append_log(msg)
             self.append_log("==========================")
             QMessageBox.information(self, "对局结束", msg)
@@ -967,16 +990,15 @@ class MainWindow(QMainWindow):
         if self.controller.is_game_over():
             self._refresh_status()
             return
-        if self.controller.agent_for(self.controller.board.current_player) is not None:
-            return
-        if self.controller.board.current_player != self.human_color:
+        cp = self.controller.board.current_player
+        if self.controller.agent_for(cp) is not None:
             return
 
         piece = self.controller.board.get_piece(row, col)
         clicked_item = self.board_view.piece_item_at(row, col)
 
         if self._selected is None:
-            if piece and piece.color == self.human_color:
+            if piece and piece.color == cp:
                 self._selected = (row, col)
                 self._selected_item = clicked_item
                 if self._selected_item is not None:
@@ -997,7 +1019,7 @@ class MainWindow(QMainWindow):
         self._selected = None
         self._selected_item = None
 
-        outcome = self.controller.try_apply_player_move(move, player=self.human_color)
+        outcome = self.controller.try_apply_player_move(move, player=cp)
         if not outcome.ok:
             self.status_label.setText(outcome.message or "无效走子")
             if outcome.message:
@@ -1043,6 +1065,7 @@ class MainWindow(QMainWindow):
         board_snapshot = self.controller.board.copy()
         run_id = self._run_id
         game_hist = list(self.controller.game_history_hashes)
+        move_hist = list(self.controller.history)
         self._ai_thread = AIMoveThread(
             ai=current_agent,
             board_snapshot=board_snapshot,
@@ -1050,6 +1073,7 @@ class MainWindow(QMainWindow):
             time_limit_s=self._AI_TIME_LIMIT_S,
             run_id=run_id,
             game_history_hashes=game_hist,
+            move_history=move_hist,
         )
         self._ai_thread.move_ready.connect(self._on_ai_move_ready)
         self._ai_thread.start()
