@@ -217,9 +217,19 @@ def _expand_one(
 
 
 def _simulate(board: Board, root_player: str) -> float:
-    """动态截断启发模拟（Heavy Playout）。
+    """轻量级模拟（Lightweight Rollout）。
 
-    截断步数根据子力数量自适应：繁杂局面截断更早，残局允许更深模拟。
+    与 Selection / Expansion 阶段不同，模拟阶段使用以下激进优化：
+
+    - **O(1) 终局检测**：不调用 ``Rules.winner()``（其内部做全量合法走法生成,
+      占 profile 90% 时间）。改为每步开头检测对方老将是否仍处于被将军状态——
+      若前一步行棋方未解将 / 主动送将，则对方可视为"吃将"获胜。
+    - **伪合法走法**：使用 ``get_pseudo_legal_moves``（几何 + 颜色过滤），
+      不调用 ``is_valid_move`` / ``is_king_in_check`` 逐着校验。
+    - **吃将一击必杀**：生成走法后，先扫描对方老将坐标是否可达；
+      如有可直接吃将的着法，立即执行并返回结果，终止模拟。
+    - **零合法性选择**：普通着法随机选取（吃子优先）后直接 apply_move，
+      不做自将 / 白脸将检查。由下一步的终局检测兜底。
     """
     sim_board = board.copy()
     b_grid = sim_board.board
@@ -227,49 +237,104 @@ def _simulate(board: Board, root_player: str) -> float:
 
     for _ in range(rollout_limit):
         cp = sim_board.current_player
-        w = Rules.winner(sim_board)
-        if w is not None:
-            return 1.0 if w == root_player else 0.0
+        opp = "black" if cp == "red" else "red"
+
+        # O(1)-ish 终局检测：前一步行棋方若送将 / 未解将，对方老将处于被将军状态
+        # → 当前行棋方可"吃将"获胜。单次 is_king_in_check ≈ 6μs，远低于 winner() 的 1.2ms。
+        if Rules.is_king_in_check(sim_board, opp):
+            return 1.0 if cp == root_player else 0.0
 
         moves = list(Rules.get_pseudo_legal_moves(sim_board, cp))
         if not moves:
-            opp = "black" if cp == "red" else "red"
-            return 1.0 if opp == root_player else 0.0
+            return 0.0 if cp == root_player else 1.0
 
-        if not _pick_rollout_move(sim_board, moves, cp, b_grid):
-            break
+        # 吃将一击必杀：扫描对方老将坐标，若有直达着法立即终止模拟
+        opp_king = sim_board.black_king_pos if cp == "red" else sim_board.red_king_pos
+        if opp_king is not None:
+            okr, okc = opp_king
+            king_cap = _find_king_capture(sim_board, cp, b_grid, okr, okc)
+            if king_cap is not None:
+                sim_board.apply_move(*king_cap)
+                return 1.0 if cp == root_player else 0.0
+
+        # 启发式随机走子（无合法性校验）
+        _pick_rollout_move_fast(sim_board, moves, b_grid)
 
     return _eval_to_winrate(sim_board, root_player)
 
 
-def _pick_rollout_move(
+def _find_king_capture(
+    board: Board,
+    attacker: str,
+    b_grid,
+    tkr: int,
+    tkc: int,
+) -> Optional[Tuple[int, int, int, int]]:
+    """单目标可达性：检查 ``attacker`` 方是否有棋子可直接吃到 ``(tkr, tkc)`` 处的老将。
+
+    仅做几何 + 蹩腿判定，不做完整合法性校验（模拟阶段专用）。
+    ``get_pseudo_legal_moves`` 会过滤掉吃将着法，因此需要此独立检测。
+    """
+    for r, c in board.active_pieces[attacker]:
+        p = b_grid[r][c]
+        if p is None:
+            continue
+        pt = p.piece_type
+
+        if pt == "che":
+            if r == tkr and c != tkc:
+                lo, hi = (c + 1, tkc) if c < tkc else (tkc + 1, c)
+                if not any(b_grid[r][x] is not None for x in range(lo, hi)):
+                    return (r, c, tkr, tkc)
+            elif c == tkc and r != tkr:
+                lo, hi = (r + 1, tkr) if r < tkr else (tkr + 1, r)
+                if not any(b_grid[x][c] is not None for x in range(lo, hi)):
+                    return (r, c, tkr, tkc)
+
+        elif pt == "pao":
+            if r == tkr and c != tkc:
+                lo, hi = (c + 1, tkc) if c < tkc else (tkc + 1, c)
+                if sum(1 for x in range(lo, hi) if b_grid[r][x] is not None) == 1:
+                    return (r, c, tkr, tkc)
+            elif c == tkc and r != tkr:
+                lo, hi = (r + 1, tkr) if r < tkr else (tkr + 1, r)
+                if sum(1 for x in range(lo, hi) if b_grid[x][c] is not None) == 1:
+                    return (r, c, tkr, tkc)
+
+        elif pt == "ma":
+            dr, dc = tkr - r, tkc - c
+            if (abs(dr), abs(dc)) in ((1, 2), (2, 1)):
+                lr, lc = Rules._ma_leg_square(r, c, tkr, tkc)
+                if 0 <= lr < 10 and 0 <= lc < 9 and b_grid[lr][lc] is None:
+                    return (r, c, tkr, tkc)
+
+        elif pt == "bing":
+            if attacker == "red":
+                if (tkr == r - 1 and tkc == c) or (r <= 4 and tkr == r and abs(tkc - c) == 1):
+                    return (r, c, tkr, tkc)
+            else:
+                if (tkr == r + 1 and tkc == c) or (r >= 5 and tkr == r and abs(tkc - c) == 1):
+                    return (r, c, tkr, tkc)
+
+    return None
+
+
+def _pick_rollout_move_fast(
     sim_board: Board,
     moves: List[Tuple[int, int, int, int]],
-    mover: str,
     b_grid,
-) -> bool:
-    """启发式走子：优先吃子，跳过自将。"""
+) -> None:
+    """零校验启发式走子：吃子优先，直接 apply_move，不做合法性检查。
+
+    非法状态（自将 / 白脸将）由下一步的终局检测兜底。
+    使用 ``random.choice`` 而非 ``random.shuffle`` 以节省 O(n) 开销。
+    """
     captures = [m for m in moves if b_grid[m[2]][m[3]] is not None]
-    use_captures = captures and random.random() < _CAPTURE_PROB
-    pool = captures if use_captures else moves
-    random.shuffle(pool)
-    for m in pool:
-        cap = sim_board.apply_move(*m)
-        if Rules.is_king_in_check(sim_board, mover) or Rules._jiang_face_to_face(sim_board):
-            sim_board.undo_move(*m, cap)
-            continue
-        return True
-    if use_captures:
-        random.shuffle(moves)
-        for m in moves:
-            if b_grid[m[2]][m[3]] is not None:
-                continue
-            cap = sim_board.apply_move(*m)
-            if Rules.is_king_in_check(sim_board, mover) or Rules._jiang_face_to_face(sim_board):
-                sim_board.undo_move(*m, cap)
-                continue
-            return True
-    return False
+    if captures and random.random() < _CAPTURE_PROB:
+        m = random.choice(captures)
+    else:
+        m = random.choice(moves)
+    sim_board.apply_move(*m)
 
 
 def _eval_to_winrate(board: Board, root_player: str) -> float:
