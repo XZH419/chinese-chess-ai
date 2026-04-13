@@ -15,14 +15,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--red",
         type=str,
-        choices=["human", "minimax", "random"],
+        choices=["human", "minimax", "random", "mcts"],
         default="human",
         help="红方玩家类型",
     )
     parser.add_argument(
         "--black",
         type=str,
-        choices=["human", "minimax", "random"],
+        choices=["human", "minimax", "random", "mcts"],
         default="minimax",
         help="黑方玩家类型",
     )
@@ -34,6 +34,7 @@ if __name__ == "__main__":
     from chinese_chess.control.controller import GameController, format_matchup_line
     from chinese_chess.algorithm.random_ai import RandomAI
     from chinese_chess.algorithm.minimax import MinimaxAI
+    from chinese_chess.algorithm.mcts import MCTSAI
 
     def build_agent(kind: str, *, depth: int):
         if kind == "human":
@@ -42,6 +43,8 @@ if __name__ == "__main__":
             return RandomAI()
         if kind == "minimax":
             return MinimaxAI(depth=depth)
+        if kind == "mcts":
+            return MCTSAI(time_limit=3.0, max_simulations=5000)
         raise ValueError(f"unknown player kind: {kind!r}")
 
     red_agent = build_agent(args.red, depth=args.red_depth)

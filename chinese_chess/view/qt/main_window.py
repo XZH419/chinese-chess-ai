@@ -10,6 +10,7 @@ from PyQt5.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QThr
 from PyQt5.QtGui import QFont, QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QComboBox,
     QGraphicsObject,
     QGraphicsPixmapItem,
     QGraphicsScene,
@@ -25,6 +26,8 @@ from PyQt5.QtWidgets import (
 )
 
 from chinese_chess.algorithm.minimax import MinimaxAI
+from chinese_chess.algorithm.mcts import MCTSAI
+from chinese_chess.algorithm.random_ai import RandomAI
 from chinese_chess.control.controller import GameController, MoveOutcome
 
 
@@ -337,9 +340,17 @@ class MainWindow(QMainWindow):
         main.addWidget(self.info_panel, 0)
 
         self.status_label = QLabel("")
-        # 长状态文本自动换行，避免被截断/折叠
         self.status_label.setWordWrap(True)
         right.addWidget(self.status_label)
+
+        # AI 类型选择（黑方）
+        ai_label = QLabel("黑方 AI 类型：")
+        right.addWidget(ai_label)
+        self._ai_combo = QComboBox()
+        self._ai_combo.addItems(["Human", "Random", "Minimax", "MCTS (蒙特卡洛)"])
+        self._ai_combo.setCurrentIndex(self._agent_to_combo_index(self.controller.black_agent))
+        self._ai_combo.currentIndexChanged.connect(self._on_ai_type_changed)
+        right.addWidget(self._ai_combo)
 
         # GUI 实时控制台（Dashboard）
         self.log_console = QPlainTextEdit()
@@ -391,9 +402,53 @@ class MainWindow(QMainWindow):
         return "红方" if color == "red" else "黑方"
 
     def _agent_depth_hint(self, agent) -> Optional[int]:
-        # 仅用于 UI 展示；不影响底层逻辑
         d = getattr(agent, "depth", None)
         return int(d) if isinstance(d, int) else None
+
+    @staticmethod
+    def _agent_label(agent) -> str:
+        """生成用于状态栏的简短 AI 描述。"""
+        cls = type(agent).__name__
+        if cls == "MinimaxAI":
+            d = getattr(agent, "depth", None)
+            return f"深度: {d}" if isinstance(d, int) else "Minimax"
+        if cls == "MCTSAI":
+            sims = getattr(agent, "max_simulations", None)
+            return f"MCTS, {sims} sims" if sims else "MCTS"
+        if cls == "RandomAI":
+            return "Random"
+        return cls
+
+    @staticmethod
+    def _agent_to_combo_index(agent) -> int:
+        """将 agent 实例映射到 ComboBox 索引。"""
+        if agent is None:
+            return 0  # Human
+        cls = type(agent).__name__
+        if cls == "RandomAI":
+            return 1
+        if cls == "MinimaxAI":
+            return 2
+        if cls == "MCTSAI":
+            return 3
+        return 0
+
+    def _on_ai_type_changed(self, index: int) -> None:
+        """用户切换黑方 AI 类型后，重建 agent 并重置对局。"""
+        if index == 0:
+            new_agent = None
+        elif index == 1:
+            new_agent = RandomAI()
+        elif index == 2:
+            new_agent = MinimaxAI(depth=3)
+        elif index == 3:
+            new_agent = MCTSAI(time_limit=3.0, max_simulations=5000)
+        else:
+            new_agent = None
+
+        self.controller.black_agent = new_agent
+        self._sync_human_color_from_controller()
+        self._reset_game()
 
     def _refresh_status(self) -> None:
         result = self.controller.current_result()
@@ -412,11 +467,9 @@ class MainWindow(QMainWindow):
         if agent is None:
             self.status_label.setText(f"[{self._side_name(player)}] 请走棋")
         else:
-            depth = self._agent_depth_hint(agent)
-            if depth is not None:
-                self.status_label.setText(f"[{self._side_name(player)}] AI 正在思考 (深度: {depth})...")
-            else:
-                self.status_label.setText(f"[{self._side_name(player)}] AI 正在思考...")
+            self.status_label.setText(
+                f"[{self._side_name(player)}] AI 正在思考 ({self._agent_label(agent)})..."
+            )
 
     def _reset_game(self) -> None:
         # 1) 安全中断当前计算：防止旧线程回调导致“幽灵走子”
@@ -518,15 +571,10 @@ class MainWindow(QMainWindow):
             return
 
         side = self._side_name(cp)
-        depth = self._agent_depth_hint(current_agent)
-        if depth is not None:
-            print(f"[UI] 检测到 AI 回合（{side}，深度={depth}），启动计算...")
-            self.status_label.setText(f"[{side}] AI 正在思考 (深度: {depth})...")
-            self.append_log(f"[UI] 检测到 AI 回合 ({side})，开始计算...")
-        else:
-            print(f"[UI] 检测到 AI 回合（{side}），启动计算...")
-            self.status_label.setText(f"[{side}] AI 正在思考...")
-            self.append_log(f"[UI] 检测到 AI 回合 ({side})，开始计算...")
+        label = self._agent_label(current_agent)
+        print(f"[UI] 检测到 AI 回合（{side}，{label}），启动计算...")
+        self.status_label.setText(f"[{side}] AI 正在思考 ({label})...")
+        self.append_log(f"[UI] 检测到 AI 回合 ({side}, {label})，开始计算...")
 
         board_snapshot = self.controller.board.copy()
         ai_color = cp
@@ -550,15 +598,20 @@ class MainWindow(QMainWindow):
             return
         print(f"[UI] AI move signal received: {move}")
         if stats:
-            depth = stats.get("depth", "?")
             time_taken = stats.get("time_taken", "?")
-            nodes = stats.get("nodes_evaluated", "?")
-            tt_hits = stats.get("tt_hits")
-            self.append_log("本次搜索深度: " + str(depth))
             self.append_log("搜索耗时 (秒): " + (f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)))
-            self.append_log("评估的节点总数: " + str(nodes))
-            if tt_hits is not None:
-                self.append_log("置换表命中次数: " + str(tt_hits))
+
+            sims = stats.get("simulations")
+            if sims is not None:
+                self.append_log(f"MCTS 模拟次数: {sims}")
+            else:
+                depth = stats.get("depth", "?")
+                nodes = stats.get("nodes_evaluated", "?")
+                tt_hits = stats.get("tt_hits")
+                self.append_log("本次搜索深度: " + str(depth))
+                self.append_log("评估的节点总数: " + str(nodes))
+                if tt_hits is not None:
+                    self.append_log("置换表命中次数: " + str(tt_hits))
         self.append_log("[UI] AI 信号接收完成，执行落子。")
         self.append_log("--------------------------")
         if move:

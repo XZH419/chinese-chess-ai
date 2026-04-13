@@ -17,7 +17,7 @@ from chinese_chess.model.rules import MoveEntry, Rules
 
 
 def describe_player_agent(agent: Optional[Any]) -> str:
-    """人类 / Minimax / Random 等单侧展示名（不含「红方」前缀）。"""
+    """人类 / Minimax / Random / MCTS 等单侧展示名（不含「红方」前缀）。"""
     if agent is None:
         return "Human"
     cls = type(agent).__name__
@@ -26,6 +26,9 @@ def describe_player_agent(agent: Optional[Any]) -> str:
         return f"Minimax, Depth={d}" if isinstance(d, int) else "Minimax"
     if cls == "RandomAI":
         return "Random"
+    if cls == "MCTSAI":
+        sims = getattr(agent, "max_simulations", None)
+        return f"MCTS, Sims={sims}" if sims is not None else "MCTS"
     return cls
 
 
