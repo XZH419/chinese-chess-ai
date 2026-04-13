@@ -434,11 +434,12 @@ class MainWindow(QMainWindow):
         is_game_running: 是否处于对局进行中状态。
     """
 
+    # 下拉框仅展示名称；索引用 _IDX_* 映射到内部 agent，勿改顺序
     _AI_TYPES = [
-        "Human (人类)",
-        "Random (随机)",
-        "Minimax (极大极小)",
-        "MCTS (蒙特卡洛)",
+        "玩家",
+        "随机",
+        "Minimax",
+        "MCTS",
         "MCTS-Minimax",
     ]
     _IDX_HUMAN, _IDX_RANDOM, _IDX_MINIMAX, _IDX_MCTS, _IDX_MCTS_MINIMAX = 0, 1, 2, 3, 4
@@ -455,7 +456,7 @@ class MainWindow(QMainWindow):
 
         Args:
             controller: 外部注入的游戏控制器实例。若为 ``None``，
-                则创建默认的人类 vs 人类控制器。若注入的控制器
+                则创建默认的玩家 vs 玩家控制器。若注入的控制器
                 已绑定 AI 代理，窗口将自动同步 UI 配置并开始对局。
         """
         super().__init__()
@@ -613,7 +614,7 @@ class MainWindow(QMainWindow):
             spin: 对应的参数数值输入框控件。
         """
         if index == self._IDX_MINIMAX:
-            label.setText("搜索深度：")
+            label.setText("深度：")
             label.show()
             spin.setRange(1, 8)
             spin.setValue(3)
@@ -644,7 +645,7 @@ class MainWindow(QMainWindow):
         用于外部注入已配置好的 Controller 时，将 AI 参数同步到 UI 控件。
 
         Args:
-            agent: AI 代理实例，``None`` 表示人类。
+            agent: AI 代理实例，``None`` 表示玩家。
             label: 对应的参数标签控件。
             spin: 对应的参数数值输入框控件。
         """
@@ -655,7 +656,7 @@ class MainWindow(QMainWindow):
         cls = type(agent).__name__
         if cls == "MinimaxAI":
             d = getattr(agent, "depth", 3)
-            label.setText("搜索深度：")
+            label.setText("深度：")
             label.show()
             spin.setRange(1, 8)
             spin.setValue(int(d))
@@ -688,7 +689,7 @@ class MainWindow(QMainWindow):
             spin: 参数数值输入框控件。
 
         Returns:
-            AI 代理实例；若选择 Human 则返回 ``None``。
+            AI 代理实例；若选择「玩家」则返回 ``None``。
         """
         idx = combo.currentIndex()
         if idx == self._IDX_HUMAN:
@@ -737,8 +738,8 @@ class MainWindow(QMainWindow):
         self._set_config_enabled(False)
         self.start_btn.setText("结束 / 重置对局")
 
-        # 4) UI 反馈
-        matchup = self.controller.matchup_line()
+        # 4) UI 反馈（对局标题/日志使用 GUI 专用文案，不沿用控制台 matchup_line）
+        matchup = self._gui_matchup_line()
         self.setWindowTitle(f"中国象棋 — {matchup}")
         self.log_console.clear()
         self.append_log(f"[对局] {matchup}")
@@ -787,8 +788,35 @@ class MainWindow(QMainWindow):
 
     # ────────────────────── 代理描述 / 映射 ──────────────────────
 
+    @staticmethod
+    def _gui_agent_brief(agent) -> str:
+        """对局标题、状态栏用的简短引擎名（含可选参数），与控制台 describe 无关。"""
+        if agent is None:
+            return "玩家"
+        cls = type(agent).__name__
+        if cls == "RandomAI":
+            return "随机"
+        if cls == "MinimaxAI":
+            d = getattr(agent, "depth", None)
+            return f"Minimax · {d}" if isinstance(d, int) else "Minimax"
+        if cls == "MCTSAI":
+            s = getattr(agent, "max_simulations", None)
+            w = getattr(agent, "workers", 1)
+            return f"MCTS · {s}/{w}" if s is not None else "MCTS"
+        if cls == "MCTSMinimaxAI":
+            s = getattr(agent, "max_simulations", None)
+            w = getattr(agent, "workers", 1)
+            return f"MCTS-Minimax · {s}/{w}" if s is not None else "MCTS-Minimax"
+        return cls
+
+    def _gui_matchup_line(self) -> str:
+        """窗口标题与对局日志中的对阵行。"""
+        r = self._gui_agent_brief(self.controller.red_agent)
+        b = self._gui_agent_brief(self.controller.black_agent)
+        return f"红方 · {r} vs 黑方 · {b}"
+
     def _sync_human_color_from_controller(self) -> None:
-        """根据控制器中红黑双方的 AI 配置推断人类玩家所执颜色。"""
+        """根据控制器中红黑双方的 AI 配置推断玩家所执颜色。"""
         r, b = self.controller.red_agent, self.controller.black_agent
         if r is None and b is not None:
             self.human_color = "red"
@@ -799,41 +827,18 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _agent_label(agent) -> str:
-        """生成用于状态栏显示的简短 AI 描述。
-
-        Args:
-            agent: AI 代理实例，``None`` 表示人类。
-
-        Returns:
-            str: 简短描述字符串（如 ``"Minimax 深度=3"``）。
-        """
-        if agent is None:
-            return "Human"
-        cls = type(agent).__name__
-        if cls == "MinimaxAI":
-            d = getattr(agent, "depth", None)
-            return f"Minimax 深度={d}" if isinstance(d, int) else "Minimax"
-        if cls == "MCTSAI":
-            s = getattr(agent, "max_simulations", None)
-            w = getattr(agent, "workers", 1)
-            return f"MCTS {s}sims/{w}w" if s else "MCTS"
-        if cls == "MCTSMinimaxAI":
-            s = getattr(agent, "max_simulations", None)
-            w = getattr(agent, "workers", 1)
-            return f"MCTS-Minimax {s}sims/{w}w" if s else "MCTS-Minimax"
-        if cls == "RandomAI":
-            return "Random"
-        return cls
+        """状态栏 / 日志中当前思考方的简短描述（与 _gui_agent_brief 一致）。"""
+        return MainWindow._gui_agent_brief(agent)
 
     @staticmethod
     def _agent_to_combo_index(agent) -> int:
         """将 AI 代理实例映射为 UI 下拉框对应的索引值。
 
         Args:
-            agent: AI 代理实例，``None`` 表示人类。
+            agent: AI 代理实例，``None`` 表示玩家。
 
         Returns:
-            int: 对应的下拉框选项索引（0=人类, 1=随机, 2=极大极小, 3=MCTS）。
+            int: 对应的下拉框选项索引（0=玩家, 1=随机, 2=Minimax, 3=MCTS, 4=MCTS-Minimax）。
         """
         if agent is None:
             return 0
@@ -921,10 +926,10 @@ class MainWindow(QMainWindow):
         player = result["current_player"]
         agent = self.controller.agent_for(player)
         if agent is None:
-            self.status_label.setText(f"[{self._side_name(player)}] 请走棋")
+            self.status_label.setText(f"{self._side_name(player)} · 请走棋")
         else:
             self.status_label.setText(
-                f"[{self._side_name(player)}] AI 正在思考 ({self._agent_label(agent)})..."
+                f"{self._side_name(player)} · {self._agent_label(agent)} 思考中…"
             )
 
     # ────────────────────── 棋盘点击 ──────────────────────
@@ -1013,9 +1018,9 @@ class MainWindow(QMainWindow):
 
         side = self._side_name(cp)
         label = self._agent_label(current_agent)
-        print(f"[UI] 检测到 AI 回合（{side}，{label}），启动计算...")
-        self.status_label.setText(f"[{side}] AI 正在思考 ({label})...")
-        self.append_log(f"[UI] 检测到 AI 回合 ({side}, {label})，开始计算...")
+        print(f"[UI] {side} · {label} 思考中，启动计算…")
+        self.status_label.setText(f"{side} · {label} 思考中…")
+        self.append_log(f"[UI] {side} · {label}，开始计算…")
 
         board_snapshot = self.controller.board.copy()
         run_id = self._run_id
@@ -1057,7 +1062,7 @@ class MainWindow(QMainWindow):
                 self._log_mcts_stats(stats)
             else:
                 self._log_minimax_stats(stats)
-        self.append_log("[UI] AI 信号接收完成，执行落子。")
+        self.append_log("[UI] 已收到走法，执行落子。")
         self.append_log("--------------------------")
         if move:
 
@@ -1080,7 +1085,7 @@ class MainWindow(QMainWindow):
         time_str = (
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
         )
-        self.append_log(f"Random AI 随机落子")
+        self.append_log("随机落子")
         self.append_log(f"耗时 (秒): {time_str}s")
 
     def _log_mcts_stats(self, stats: dict) -> None:
@@ -1095,8 +1100,8 @@ class MainWindow(QMainWindow):
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
         )
         self.append_log(f"搜索耗时 (秒): {time_str}")
-        self.append_log(f"MCTS 模拟次数: {stats.get('simulations', 0)}")
-        self.append_log(f"并行 Workers: {stats.get('workers', 1)}")
+        self.append_log(f"模拟次数: {stats.get('simulations', 0)}")
+        self.append_log(f"并行: {stats.get('workers', 1)}")
         win_rate = stats.get("win_rate", "")
         if win_rate:
             self.append_log(f"当前胜率: {win_rate}")
@@ -1108,19 +1113,21 @@ class MainWindow(QMainWindow):
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
         )
         self.append_log(f"搜索耗时 (秒): {time_str}")
-        self.append_log(f"MCTS-Minimax 模拟次数: {stats.get('simulations', 0)}")
-        self.append_log(f"并行 Workers: {stats.get('workers', 1)}")
+        self.append_log(f"模拟次数: {stats.get('simulations', 0)}")
+        self.append_log(f"并行: {stats.get('workers', 1)}")
         win_rate = stats.get("win_rate", "")
         if win_rate:
             self.append_log(f"当前胜率: {win_rate}")
         pc = stats.get("probe_count")
         pn = stats.get("probe_nodes")
         if pc is not None:
-            self.append_log(f"Minimax Probe 次数: {pc}" + (f", probe 节点: {pn}" if pn is not None else ""))
+            self.append_log(
+                f"局部 Minimax 次数: {pc}" + (f"，节点: {pn}" if pn is not None else "")
+            )
         bc = stats.get("budget_calls_used")
         bm = stats.get("budget_calls_max")
         if bc is not None and bm is not None:
-            self.append_log(f"Probe 预算 (calls): {bc}/{bm}")
+            self.append_log(f"局部搜索预算: {bc}/{bm}")
 
     def _log_minimax_stats(self, stats: dict) -> None:
         """将 Minimax 搜索统计信息格式化后写入日志。
@@ -1134,11 +1141,11 @@ class MainWindow(QMainWindow):
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
         )
         self.append_log(f"搜索耗时 (秒): {time_str}")
-        self.append_log(f"本次搜索深度: {stats.get('depth', '?')}")
-        self.append_log(f"评估的节点总数: {stats.get('nodes_evaluated', '?')}")
+        self.append_log(f"深度: {stats.get('depth', '?')}")
+        self.append_log(f"节点数: {stats.get('nodes_evaluated', '?')}")
         tt_hits = stats.get("tt_hits")
         if tt_hits is not None:
-            self.append_log(f"置换表命中次数: {tt_hits}")
+            self.append_log(f"置换表命中: {tt_hits}")
 
 
 if __name__ == "__main__":
