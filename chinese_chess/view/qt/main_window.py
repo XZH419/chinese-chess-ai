@@ -41,6 +41,7 @@ from PyQt5.QtWidgets import (
 
 from chinese_chess.algorithm.minimax import MinimaxAI
 from chinese_chess.algorithm.mcts import MCTSAI
+from chinese_chess.algorithm.mcts_minimax import MCTSMinimaxAI
 from chinese_chess.algorithm.random_ai import RandomAI
 from chinese_chess.control.controller import GameController, MoveOutcome
 
@@ -433,8 +434,14 @@ class MainWindow(QMainWindow):
         is_game_running: 是否处于对局进行中状态。
     """
 
-    _AI_TYPES = ["Human (人类)", "Random (随机)", "Minimax (极大极小)", "MCTS (蒙特卡洛)"]
-    _IDX_HUMAN, _IDX_RANDOM, _IDX_MINIMAX, _IDX_MCTS = 0, 1, 2, 3
+    _AI_TYPES = [
+        "Human (人类)",
+        "Random (随机)",
+        "Minimax (极大极小)",
+        "MCTS (蒙特卡洛)",
+        "MCTS+Minimax (混合)",
+    ]
+    _IDX_HUMAN, _IDX_RANDOM, _IDX_MINIMAX, _IDX_MCTS, _IDX_MCTS_MINIMAX = 0, 1, 2, 3, 4
 
     # 棋子选中 / 拿起时的放大倍率（模拟"悬浮"视觉效果）
     _PIECE_HIGHLIGHT_SCALE = 1.2
@@ -619,6 +626,13 @@ class MainWindow(QMainWindow):
             spin.setValue(5000)
             spin.setSingleStep(500)
             spin.show()
+        elif index == self._IDX_MCTS_MINIMAX:
+            label.setText("模拟次数：")
+            label.show()
+            spin.setRange(100, 100000)
+            spin.setValue(5000)
+            spin.setSingleStep(500)
+            spin.show()
         else:
             label.hide()
             spin.hide()
@@ -653,6 +667,13 @@ class MainWindow(QMainWindow):
             spin.setRange(100, 100000)
             spin.setValue(int(s))
             spin.show()
+        elif cls == "MCTSMinimaxAI":
+            s = getattr(agent, "max_simulations", 5000)
+            label.setText("模拟次数：")
+            label.show()
+            spin.setRange(100, 100000)
+            spin.setValue(int(s))
+            spin.show()
         else:
             label.hide()
             spin.hide()
@@ -678,6 +699,12 @@ class MainWindow(QMainWindow):
             return MinimaxAI(depth=spin.value())
         if idx == self._IDX_MCTS:
             return MCTSAI(time_limit=5.0, max_simulations=spin.value())
+        if idx == self._IDX_MCTS_MINIMAX:
+            return MCTSMinimaxAI(
+                time_limit=10.0,
+                max_simulations=spin.value(),
+                verbose=False,
+            )
         return None
 
     def _on_start_stop(self) -> None:
@@ -790,6 +817,10 @@ class MainWindow(QMainWindow):
             s = getattr(agent, "max_simulations", None)
             w = getattr(agent, "workers", 1)
             return f"MCTS {s}sims/{w}w" if s else "MCTS"
+        if cls == "MCTSMinimaxAI":
+            s = getattr(agent, "max_simulations", None)
+            w = getattr(agent, "workers", 1)
+            return f"Hybrid {s}sims/{w}w" if s else "Hybrid"
         if cls == "RandomAI":
             return "Random"
         return cls
@@ -813,6 +844,8 @@ class MainWindow(QMainWindow):
             return 2
         if cls == "MCTSAI":
             return 3
+        if cls == "MCTSMinimaxAI":
+            return 4
         return 0
 
     def _side_name(self, color: str) -> str:
@@ -1018,6 +1051,8 @@ class MainWindow(QMainWindow):
                 self.append_log("命中开局库 | 耗时: 0.0s")
             elif stats.get("random"):
                 self._log_random_stats(stats)
+            elif stats.get("probe_count") is not None and not stats.get("opening_book"):
+                self._log_hybrid_stats(stats)
             elif stats.get("simulations") is not None:
                 self._log_mcts_stats(stats)
             else:
@@ -1065,6 +1100,27 @@ class MainWindow(QMainWindow):
         win_rate = stats.get("win_rate", "")
         if win_rate:
             self.append_log(f"当前胜率: {win_rate}")
+
+    def _log_hybrid_stats(self, stats: dict) -> None:
+        """将 MCTS+Minimax 混合搜索的统计信息写入日志。"""
+        time_taken = stats.get("time_taken", 0)
+        time_str = (
+            f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
+        )
+        self.append_log(f"搜索耗时 (秒): {time_str}")
+        self.append_log(f"混合引擎 模拟次数: {stats.get('simulations', 0)}")
+        self.append_log(f"并行 Workers: {stats.get('workers', 1)}")
+        win_rate = stats.get("win_rate", "")
+        if win_rate:
+            self.append_log(f"当前胜率: {win_rate}")
+        pc = stats.get("probe_count")
+        pn = stats.get("probe_nodes")
+        if pc is not None:
+            self.append_log(f"Minimax Probe 次数: {pc}" + (f", probe 节点: {pn}" if pn is not None else ""))
+        bc = stats.get("budget_calls_used")
+        bm = stats.get("budget_calls_max")
+        if bc is not None and bm is not None:
+            self.append_log(f"Probe 预算 (calls): {bc}/{bm}")
 
     def _log_minimax_stats(self, stats: dict) -> None:
         """将 Minimax 搜索统计信息格式化后写入日志。

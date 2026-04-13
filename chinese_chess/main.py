@@ -12,11 +12,15 @@
     # CLI 模式：MCTS vs Minimax
     python -m chinese_chess.main cli --red mcts --black minimax
 
+    # MCTS+Minimax 混合引擎（别名：hybrid、mcts_minmax、mcts-minmax）
+    python -m chinese_chess.main cli --red mcts_minimax --black minimax --red-sims 3000
+
 支持的玩家类型：
     - ``human``: 人类玩家（CLI 手动输入 / GUI 鼠标点击）
     - ``minimax``: 极大极小搜索 AI（可配置搜索深度）
     - ``random``: 随机走子 AI
     - ``mcts``: 蒙特卡洛树搜索 AI
+    - ``mcts_minimax`` / ``hybrid`` / ``mcts_minmax`` 等：MCTS 主干 + Minimax 局部精算
 """
 
 import sys
@@ -27,6 +31,30 @@ import argparse
 # 用户从仓库根目录执行 `python chinese_chess/main.py` 时也能正常工作。
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+# 命令行可用的玩家类型（含常见别名，在 build 前会规范化为内部键）
+_AI_CHOICE_STRINGS = [
+    "human",
+    "minimax",
+    "random",
+    "mcts",
+    "mcts_minimax",
+    "mcts_minmax",
+    "hybrid",
+    "mcts-minimax",
+    "mcts-minmax",
+]
+
+
+def _normalize_ai_kind(kind: str) -> str:
+    """将 CLI 别名统一为内部使用的引擎键。"""
+    k = kind.strip().lower().replace("-", "_")
+    aliases = {
+        "hybrid": "mcts_minimax",
+        "mcts_minmax": "mcts_minimax",
+    }
+    return aliases.get(k, k)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="中国象棋 AI 启动入口")
     parser.add_argument("mode", nargs="?", default="cli", choices=["cli", "gui"], help="启动模式：cli 或 gui")
@@ -34,19 +62,31 @@ if __name__ == "__main__":
     parser.add_argument(
         "--red",
         type=str,
-        choices=["human", "minimax", "random", "mcts"],
+        choices=_AI_CHOICE_STRINGS,
         default="human",
-        help="红方玩家类型",
+        help="红方玩家类型（混合引擎可写 mcts_minimax / hybrid / mcts_minmax）",
     )
     parser.add_argument(
         "--black",
         type=str,
-        choices=["human", "minimax", "random", "mcts"],
+        choices=_AI_CHOICE_STRINGS,
         default="minimax",
         help="黑方玩家类型",
     )
     parser.add_argument("--red-depth", type=int, default=3, help="红方为 Minimax 时的搜索深度（默认 3）")
     parser.add_argument("--black-depth", type=int, default=3, help="黑方为 Minimax 时的搜索深度（默认 3）")
+    parser.add_argument(
+        "--red-sims",
+        type=int,
+        default=5000,
+        help="红方为 MCTS / 混合引擎时的最大模拟次数（默认 5000）",
+    )
+    parser.add_argument(
+        "--black-sims",
+        type=int,
+        default=5000,
+        help="黑方为 MCTS / 混合引擎时的最大模拟次数（默认 5000）",
+    )
 
     args = parser.parse_args()
 
@@ -54,20 +94,18 @@ if __name__ == "__main__":
     from chinese_chess.algorithm.random_ai import RandomAI
     from chinese_chess.algorithm.minimax import MinimaxAI
     from chinese_chess.algorithm.mcts import MCTSAI
+    from chinese_chess.algorithm.mcts_minimax import MCTSMinimaxAI
 
-    def build_agent(kind: str, *, depth: int):
+    def build_agent(kind: str, *, depth: int, sims: int):
         """根据玩家类型字符串构建对应的 AI 代理实例。
 
         Args:
-            kind: 玩家类型标识，可选 ``'human'``, ``'random'``,
-                ``'minimax'``, ``'mcts'``。
-            depth: Minimax 搜索深度（仅对 ``'minimax'`` 类型生效）。
+            kind: 规范化后的玩家类型（``mcts_minimax``、``minimax`` 等）。
+            depth: Minimax 搜索深度。
+            sims: MCTS / 混合引擎的 ``max_simulations``。
 
         Returns:
             AI 代理实例；若为 ``'human'`` 则返回 ``None``。
-
-        Raises:
-            ValueError: 当 ``kind`` 不在支持的类型列表中时抛出。
         """
         if kind == "human":
             return None
@@ -76,11 +114,19 @@ if __name__ == "__main__":
         if kind == "minimax":
             return MinimaxAI(depth=depth)
         if kind == "mcts":
-            return MCTSAI(time_limit=3.0, max_simulations=5000)
+            return MCTSAI(time_limit=10.0, max_simulations=sims, verbose=False)
+        if kind == "mcts_minimax":
+            return MCTSMinimaxAI(
+                max_simulations=sims,
+                time_limit=10.0,
+                verbose=False,
+            )
         raise ValueError(f"unknown player kind: {kind!r}")
 
-    red_agent = build_agent(args.red, depth=args.red_depth)
-    black_agent = build_agent(args.black, depth=args.black_depth)
+    red_k = _normalize_ai_kind(args.red)
+    black_k = _normalize_ai_kind(args.black)
+    red_agent = build_agent(red_k, depth=args.red_depth, sims=args.red_sims)
+    black_agent = build_agent(black_k, depth=args.black_depth, sims=args.black_sims)
 
     print("[System] " + format_matchup_line(red_agent, black_agent))
 

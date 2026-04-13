@@ -1106,7 +1106,14 @@ class MCTSMinimaxAI:
         workers: Optional[int] = None,
         probe_depth: int = _PROBE_DEFAULT_DEPTH,
         verbose: bool = True,
+        **kwargs: Any,
     ):
+        # 忽略工厂/CLI 透传的无关参数（如 stochastic、verbose 重复键等），避免 TypeError
+        if "depth" in kwargs and probe_depth == _PROBE_DEFAULT_DEPTH:
+            try:
+                probe_depth = int(kwargs["depth"])  # 兼容统一工厂把 depth 当作浅层 probe 深度
+            except (TypeError, ValueError):
+                pass
         self.max_simulations = max_simulations
         self.time_limit = time_limit
         self.verbose = verbose
@@ -1188,17 +1195,20 @@ class MCTSMinimaxAI:
                 best_move = mv
                 best_wr = st["wins"] / v if v > 0 else 0.0
 
+        probe_n = int(probe_stats.get("probe_nodes", 0))
         self.last_stats = {
             "time_taken": elapsed,
             "simulations": total_sims,
             "workers": effective_workers,
             "win_rate": f"{best_wr * 100:.1f}%",
             "probe_count": probe_stats.get("probes", 0),
-            "probe_nodes": probe_stats.get("probe_nodes", 0),
+            "probe_nodes": probe_n,
             "budget_calls_used": probe_stats.get("budget_calls_used", 0),
             "budget_calls_max": probe_stats.get("budget_calls_max", 0),
             "budget_nodes_used": probe_stats.get("budget_nodes_used", 0),
             "budget_nodes_max": probe_stats.get("budget_nodes_max", 0),
+            # 与 Minimax 统计字段对齐，供基准脚本 / 通用日志读取
+            "nodes_evaluated": probe_n + total_sims,
         }
         if self.verbose:
             print(
