@@ -391,10 +391,10 @@ class XiangqiBoardView(QGraphicsView):
             self._piece_items.pop(dst, None)
 
         # 移动过程中放大棋子，模拟"拿起悬浮"效果
-        moving_item.setScale(1.2)
+        moving_item.setScale(MainWindow._PIECE_HIGHLIGHT_SCALE)
 
         anim = QPropertyAnimation(moving_item, b"pos")
-        anim.setDuration(160)
+        anim.setDuration(MainWindow._ANIM_DURATION_MS)
         # 三次缓动曲线：加速启动 → 减速轻放
         anim.setEasingCurve(QEasingCurve.InOutCubic)
         anim.setStartValue(moving_item.pos())
@@ -435,6 +435,13 @@ class MainWindow(QMainWindow):
 
     _AI_TYPES = ["Human (人类)", "Random (随机)", "Minimax (极大极小)", "MCTS (蒙特卡洛)"]
     _IDX_HUMAN, _IDX_RANDOM, _IDX_MINIMAX, _IDX_MCTS = 0, 1, 2, 3
+
+    # 棋子选中 / 拿起时的放大倍率（模拟"悬浮"视觉效果）
+    _PIECE_HIGHLIGHT_SCALE = 1.2
+    # 棋子移动动画时长（毫秒）
+    _ANIM_DURATION_MS = 160
+    # AI 后台线程的默认思考时间上限（秒）
+    _AI_TIME_LIMIT_S = 10
 
     def __init__(self, controller: Optional[GameController] = None):
         """初始化主窗口。
@@ -917,7 +924,7 @@ class MainWindow(QMainWindow):
                 self._selected = (row, col)
                 self._selected_item = clicked_item
                 if self._selected_item is not None:
-                    self._selected_item.setScale(1.2)
+                    self._selected_item.setScale(self._PIECE_HIGHLIGHT_SCALE)
             return
 
         if self._selected == (row, col):
@@ -984,7 +991,7 @@ class MainWindow(QMainWindow):
             ai=current_agent,
             board_snapshot=board_snapshot,
             ai_color=cp,
-            time_limit_s=10,
+            time_limit_s=self._AI_TIME_LIMIT_S,
             run_id=run_id,
             game_history_hashes=game_hist,
         )
@@ -1040,6 +1047,7 @@ class MainWindow(QMainWindow):
         )
         self.append_log(f"Random AI 随机落子")
         self.append_log(f"耗时 (秒): {time_str}s")
+
     def _log_mcts_stats(self, stats: dict) -> None:
         """将 MCTS 搜索统计信息格式化后写入日志。
 

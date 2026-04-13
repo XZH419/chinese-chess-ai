@@ -72,6 +72,11 @@ class Rules:
     算法间无状态地复用。
     """
 
+    # 四个正交方向偏移量（用于车 / 炮 / 将军射线扫描）
+    _ORTH_DELTAS: Tuple[Tuple[int, int], ...] = (
+        (1, 0), (-1, 0), (0, 1), (0, -1),
+    )
+
     # 马的 8 个攻击偏移量（行差, 列差），与 ``_geometry_error`` / 伪合法生成一致
     _MA_ATTACK_DELTAS: Tuple[Tuple[int, int], ...] = (
         (2, 1),
@@ -549,13 +554,13 @@ class Rules:
 
         if piece_type == "ma":
             # 8 个日字落点，蹩马脚由 is_valid_move 内部处理
-            for dr, dc in [(2, 1), (2, -1), (-2, 1), (-2, -1), (1, 2), (1, -2), (-1, 2), (-1, -2)]:
+            for dr, dc in Rules._MA_ATTACK_DELTAS:
                 add(r + dr, c + dc)
             return cand
 
         if piece_type in ("che", "pao"):
             # 车/炮沿四个方向延伸到边界；炮的"隔子吃"由 is_valid_move 内部处理
-            for dr, dc in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+            for dr, dc in Rules._ORTH_DELTAS:
                 rr, cc = r + dr, c + dc
                 while 0 <= rr < 10 and 0 <= cc < 9:
                     cand.append((rr, cc))
@@ -631,7 +636,7 @@ class Rules:
 
             if pt == "che":
                 # 车：四方向直线扫描，遇子停（可吃敌、不可穿越）
-                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                for dr, dc in Rules._ORTH_DELTAS:
                     nr, nc = r + dr, c + dc
                     while 0 <= nr < 10 and 0 <= nc < 9:
                         cell = b[nr][nc]
@@ -647,7 +652,7 @@ class Rules:
             elif pt == "pao":
                 # 炮：直线扫描，遇到第一个子为炮架（seen_screen），
                 # 炮架之后的第一个可吃敌子为合法吃子目标
-                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                for dr, dc in Rules._ORTH_DELTAS:
                     nr, nc = r + dr, c + dc
                     seen_screen = False
                     while 0 <= nr < 10 and 0 <= nc < 9:
@@ -808,7 +813,7 @@ class Rules:
 
         # ── 车/炮检测：四方向射线扫描 ──
         # obstacles 计数：0 时遇敌车即被将，1 时遇敌炮即被将（炮架已翻过）
-        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        for dr, dc in Rules._ORTH_DELTAS:
             obstacles = 0
             r, c = kr + dr, kc + dc
             while 0 <= r < 10 and 0 <= c < 9:

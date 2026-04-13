@@ -350,30 +350,30 @@ class Board:
         Returns:
             左右镜像的新 ``Board`` 实例，拥有独立的网格和状态。
         """
-        nb = Board.__new__(Board)
-        nb.rows = 10
-        nb.cols = 9
-        nb.board = [[None] * 9 for _ in range(10)]
-        nb.active_pieces = {"red": set(), "black": set()}
-        nb.red_king_pos = None
-        nb.black_king_pos = None
+        new_board = Board.__new__(Board)
+        new_board.rows = 10
+        new_board.cols = 9
+        new_board.board = [[None] * 9 for _ in range(10)]
+        new_board.active_pieces = {"red": set(), "black": set()}
+        new_board.red_king_pos = None
+        new_board.black_king_pos = None
         for r in range(10):
             for c in range(9):
                 p = self.board[r][c]
                 if p is None:
                     continue
                 mc = 8 - c
-                nb.board[r][mc] = p
-                nb.active_pieces[p.color].add((r, mc))
+                new_board.board[r][mc] = p
+                new_board.active_pieces[p.color].add((r, mc))
                 if p.piece_type == "jiang":
                     if p.color == "red":
-                        nb.red_king_pos = (r, mc)
+                        new_board.red_king_pos = (r, mc)
                     else:
-                        nb.black_king_pos = (r, mc)
-        nb.current_player = self.current_player
-        nb.zobrist_hash = zobrist.full_hash(nb)
-        nb.state_counts = {nb.zobrist_hash: 1}
-        return nb
+                        new_board.black_king_pos = (r, mc)
+        new_board.current_player = self.current_player
+        new_board.zobrist_hash = zobrist.full_hash(new_board)
+        new_board.state_counts = {new_board.zobrist_hash: 1}
+        return new_board
 
     def __str__(self):
         """将棋盘渲染为可读的文本表格，便于在控制台调试输出。

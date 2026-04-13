@@ -206,7 +206,7 @@ def run_sanity_check() -> bool:
     RED = "\033[91m"
     GREEN = "\033[92m"
     RESET = "\033[0m"
-    ok = True
+    is_valid = True
 
     # 检查一：同一键下推荐着法是否有重复坐标
     for seq, moves in BASE_BOOK.items():
@@ -217,7 +217,7 @@ def run_sanity_check() -> bool:
                 dups.append(m)
             seen.add(m)
         if dups:
-            ok = False
+            is_valid = False
             print(f"{RED}[ERROR]{RESET} 重复应对走法 Key={seq!r} 重复坐标: {dups!r}")
 
     # 检查二：某序列的完全镜像是否已作为另一个键存在（键级对称冗余）
@@ -230,7 +230,7 @@ def run_sanity_check() -> bool:
             if pair in reported_mirror_key_pairs:
                 continue
             reported_mirror_key_pairs.add(pair)
-            ok = False
+            is_valid = False
             print(
                 f"{RED}[ERROR]{RESET} 跨分支镜像键冗余（请只保留一侧，另一侧依赖镜像生成）:\n"
                 f"       seq_A          = {seq_a!r}\n"
@@ -243,18 +243,18 @@ def run_sanity_check() -> bool:
         for m in moves:
             mm = mirror_move(m)
             if m != mm and mm in move_set:
-                ok = False
+                is_valid = False
                 print(
                     f"{RED}[ERROR]{RESET} 同局面镜像走法冗余 Key={seq!r}\n"
                     f"       m = {m!r} 与 mirror_move(m) = {mm!r} 同时出现在列表中"
                 )
                 break
 
-    if ok:
+    if is_valid:
         print(f"{GREEN}[SUCCESS] BASE_BOOK 自检通过，无任何数据冗余！{RESET}")
         print(f"  BASE_BOOK 键数量: {len(BASE_BOOK)}")
         print(f"  合并镜像后 OPENING_SEQUENCE_BOOK 键数量: {len(OPENING_SEQUENCE_BOOK)}")
-    return ok
+    return is_valid
 
 
 if __name__ == "__main__":

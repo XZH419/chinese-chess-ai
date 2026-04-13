@@ -77,6 +77,26 @@ _MAX_CHECK_EXTENSIONS = 2
 # 对所有条目做半值衰减，淘汰过时信息、控制内存增长。
 _HISTORY_AGING_THRESHOLD = 10_000
 
+# ==================== 静止搜索常量 ====================
+# Delta Pruning 裁剪阈值：约等于一车的价值（900 + 安全余量）。
+# 若 stand_pat + DELTA_MARGIN 仍低于 alpha，说明即使吃到最值钱的子也
+# 无法改善局面，可提前返回以节省搜索开销。
+_QS_DELTA_MARGIN = 1100
+
+# ==================== 将杀评估常量 ====================
+# 被将死时的基础负分。加上深度偏移量后可区分远近杀棋——
+# 越早将死得分越高，引导引擎选择最短杀棋路径。
+_MATE_BASE_SCORE = 10000
+
+# ==================== 根节点随机化常量 ====================
+# 当最优分数的绝对值超过此阈值时，认为局面已有明显优劣，
+# 关闭根节点随机化以确保搜索确定性。
+_RANDOM_SCORE_THRESHOLD = 300
+
+# ==================== 期望窗口常量 ====================
+# 初始窗口宽度约一兵 / 半马量级；过窄则频繁重搜，过宽则失去加速效果
+_ASPIRATION_WINDOW = 100.0
+
 
 class SearchTimeoutException(Exception):
     """搜索超时异常。
@@ -161,6 +181,25 @@ class MinimaxAI:
         # 历史启发表：Beta 截断着法按 depth² 加权累加，跨着法积累经验。
         # 与置换表不同，此表不在每步根搜索清空，而是通过老化机制衰减。
         self.history_table: Dict[Tuple[int, int, int, int], int] = {}
+
+    def _current_tolerance(self, is_midgame: bool, best_score: float) -> int:
+        """根据局面阶段和分差计算当前根节点随机化容差。
+
+        中局或分差明显时关闭随机化（返回 0），开局平稳期允许
+        小范围随机以增加棋路多样性。
+
+        Args:
+            is_midgame: 是否已进入中局阶段（手数 > 20）。
+            best_score: 当前搜索的最优分数。
+
+        Returns:
+            容差值：0 表示确定性搜索，正值表示随机化范围。
+        """
+        if is_midgame:
+            return 0
+        if best_score > float("-inf") and abs(best_score) >= _RANDOM_SCORE_THRESHOLD:
+            return 0
+        return self.tolerance
 
     def reset_benchmark_stats(self) -> None:
         """清零基准统计计数器。
@@ -542,11 +581,10 @@ class MinimaxAI:
         global_best_move: Optional[Tuple[int, int, int, int]] = None
         gh_len = len(move_history)
         # 中局阶段（手数 > 20）关闭根节点随机化，切换为纯确定性搜索
-        midgame_no_random = gh_len > 20
+        is_midgame = gh_len > 20
 
         # ---- 期望窗口（Aspiration Windows）配置 ----
-        # 初始窗口宽度约一兵 / 半马量级；过窄则频繁重搜，过宽则失去加速效果
-        window_size = 100.0
+        window_size = _ASPIRATION_WINDOW
         alpha_full = float("-inf")
         beta_full = float("inf")
         previous_score: Optional[float] = None
@@ -577,7 +615,7 @@ class MinimaxAI:
                 best_move_this_depth: Optional[Tuple[int, int, int, int]] = None
                 scored_moves = []
                 best_score_so_far = float("-inf")
-                any_legal = False
+                has_legal_move = False
 
                 for move in moves:
                     mover = board.current_player
@@ -591,7 +629,7 @@ class MinimaxAI:
                         board.undo_move(*move, captured)
                         continue
 
-                    any_legal = True
+                    has_legal_move = True
                     # 搜索下界快照：与容差/记录用的「业务 alpha」解耦，
                     # 避免与 PVS 根窗口互相污染
                     search_alpha = alpha
@@ -626,13 +664,7 @@ class MinimaxAI:
 
                     # 动态容差策略：中局或分差明显时关闭随机化（current_tol=0），
                     # 开局平稳期允许小范围随机以增加棋路多样性
-                    if midgame_no_random:
-                        current_tol = 0
-                    elif best_score_so_far > float("-inf") and abs(best_score_so_far) >= 300:
-                        current_tol = 0
-                    else:
-                        current_tol = self.tolerance
-
+                    current_tol = self._current_tolerance(is_midgame, best_score_so_far)
                     new_alpha = best_score_so_far - current_tol
                     if new_alpha > alpha:
                         alpha = new_alpha
@@ -640,7 +672,7 @@ class MinimaxAI:
                     if score > alpha:
                         alpha = score
 
-                if not any_legal:
+                if not has_legal_move:
                     break
 
                 # 期望窗口 fail-low：最优分数落在窗口下方，说明窄窗口下界太高，
@@ -655,16 +687,11 @@ class MinimaxAI:
                     continue
                 break
 
-            if not any_legal:
+            if not has_legal_move:
                 break  # 根节点无合法着法：被将死或困毙
 
             # 确定本层的最终容差设置
-            if midgame_no_random:
-                current_tol = 0
-            elif best_score_so_far > float("-inf") and abs(best_score_so_far) >= 300:
-                current_tol = 0
-            else:
-                current_tol = self.tolerance
+            current_tol = self._current_tolerance(is_midgame, best_score_so_far)
 
             # 过滤掉 fail-low 标记为 -inf 的无效分数
             finite_scored = [(s, m) for s, m in scored_moves if s > float("-inf")]
@@ -786,10 +813,9 @@ class MinimaxAI:
         if stand_pat >= beta:
             return beta
 
-        # Delta Pruning：若即使获得最大捕获增益（约一车 ≈ 1100 分）
+        # Delta Pruning：若即使获得最大捕获增益（约一车 ≈ _QS_DELTA_MARGIN 分）
         # 仍无法超越 alpha，则此节点无望改善局面，直接返回
-        DELTA_MARGIN = 1100
-        if stand_pat + DELTA_MARGIN <= alpha:
+        if stand_pat + _QS_DELTA_MARGIN <= alpha:
             return alpha
 
         if stand_pat > alpha:
@@ -947,7 +973,7 @@ class MinimaxAI:
 
         best = float("-inf")
         best_move = None
-        any_legal = False
+        has_legal_move = False
         is_first_move = True
 
         for move in moves:
@@ -961,7 +987,7 @@ class MinimaxAI:
                 self.history_hashes.pop()
                 board.undo_move(*move, captured)
                 continue
-            any_legal = True
+            has_legal_move = True
 
             # ---- 将军延伸 ----
             # 若走完这步后对手处于被将军状态，则不消耗深度余量，
@@ -1041,11 +1067,11 @@ class MinimaxAI:
                     self._push_killer(depth, move)
                 break
 
-        if not any_legal:
+        if not has_legal_move:
             # 无合法着法：被将死或困毙。返回负向极大值，加上深度偏移量
             # 使引擎倾向于选择最短的杀棋路径（越早将死得分越高）。
             self._nodes += 1
-            mate_score = float(-10000 + (self.depth - depth))
+            mate_score = float(-_MATE_BASE_SCORE + (self.depth - depth))
             if use_tt:
                 self._tt_store_exact(pos_key, depth, mate_score, None)
             return mate_score

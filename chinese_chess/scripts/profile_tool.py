@@ -84,7 +84,7 @@ def _play_legal_plies(board, n: int) -> int:
     for _ in range(n):
         moves = list(Rules.get_pseudo_legal_moves(board, board.current_player))
         moves.sort()
-        progressed = False
+        has_progressed = False
         for move in moves:
             sr, sc, er, ec = move
             mover = board.current_player
@@ -92,10 +92,10 @@ def _play_legal_plies(board, n: int) -> int:
             if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
                 board.undo_move(sr, sc, er, ec, captured)
                 continue
-            progressed = True
+            has_progressed = True
             played += 1
             break
-        if not progressed:
+        if not has_progressed:
             break
     return played
 
