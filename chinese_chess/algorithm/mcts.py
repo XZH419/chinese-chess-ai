@@ -1,8 +1,8 @@
 """蒙特卡洛树搜索（MCTS）AI 引擎。
 
-集成技术：UCB1 选择、惰性走法展开、apply/undo 状态回溯（零拷贝树遍历）、
-动态截断启发模拟（Heavy Playout + Evaluation 兜底）、__slots__ 节点内存优化、
-多进程根节点并行（Root Parallelism）。
+集成技术：UCB1-RAVE 混合选择、惰性走法展开、apply/undo 状态回溯（零拷贝树遍历）、
+动态截断启发模拟（Lightweight Rollout + Evaluation 兜底）、__slots__ 节点内存优化、
+多进程根节点并行（Root Parallelism）、RAVE/AMAF 快速着法价值估计。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import math
 import multiprocessing
 import random
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from chinese_chess.model.board import Board
 from chinese_chess.model.rules import Rules
@@ -22,6 +22,9 @@ from .evaluation import Evaluation
 _CAPTURE_PROB = 0.80
 _UCB_C = 1.414
 _SCORE_SCALE = 600.0
+_RAVE_CONST = 300
+
+Move4 = Tuple[int, int, int, int]
 
 
 def _dynamic_rollout_limit(piece_count: int) -> int:
@@ -39,10 +42,11 @@ def _dynamic_rollout_limit(piece_count: int) -> int:
 
 
 class MCTSNode:
-    """MCTS 搜索树节点。
+    """MCTS-RAVE 搜索树节点。
 
-    使用 ``__slots__`` 降低海量节点的内存开销。``untried_moves`` 惰性初始化：
-    仅在首次展开时调用走法生成器，后续通过 ``pop()`` 逐个消费。
+    ``rave_visits`` / ``rave_wins`` 用于 AMAF (All-Moves-As-First) 快速估值：
+    即使某子节点自身访问次数很少，也可通过模拟阶段出现的同一着法来累积统计，
+    加速收敛。
     """
 
     __slots__ = [
@@ -54,6 +58,8 @@ class MCTSNode:
         "wins",
         "untried_moves",
         "player_just_moved",
+        "rave_visits",
+        "rave_wins",
     ]
 
     def __init__(
@@ -61,7 +67,7 @@ class MCTSNode:
         state_hash: int,
         player_just_moved: str,
         parent: Optional[MCTSNode] = None,
-        move: Optional[Tuple[int, int, int, int]] = None,
+        move: Optional[Move4] = None,
     ):
         self.state_hash = state_hash
         self.parent = parent
@@ -69,8 +75,10 @@ class MCTSNode:
         self.children: List[MCTSNode] = []
         self.visits: int = 0
         self.wins: float = 0.0
-        self.untried_moves: Optional[List[Tuple[int, int, int, int]]] = None
+        self.untried_moves: Optional[List[Move4]] = None
         self.player_just_moved = player_just_moved
+        self.rave_visits: int = 0
+        self.rave_wins: float = 0.0
 
     def ensure_moves(self, board: Board) -> None:
         """惰性初始化 ``untried_moves``（仅首次调用时生成走法列表）。"""
@@ -89,14 +97,26 @@ class MCTSNode:
                 and len(self.children) == 0)
 
     def best_child_ucb(self, log_parent: float) -> MCTSNode:
-        """UCB1 选择：``log_parent`` 为父节点 ``ln(N)`` 的预计算值。"""
+        """UCB1-RAVE 混合选择。
+
+        混合公式：score = (1 - β) * mcts_val + β * rave_val + exploration
+        其中 β = rave_visits / (rave_visits + visits + RAVE_CONST)，
+        随节点访问量增大而衰减至 0（回归纯 MCTS）。
+        """
         best: Optional[MCTSNode] = None
         best_score = -1.0
         for ch in self.children:
-            if ch.visits == 0:
+            rv = ch.rave_visits
+            v = ch.visits
+            total = v + rv
+            if total == 0:
                 return ch
-            exploit = ch.wins / ch.visits
-            explore = _UCB_C * math.sqrt(log_parent / ch.visits)
+
+            mcts_val = ch.wins / v if v > 0 else 0.0
+            rave_val = ch.rave_wins / rv if rv > 0 else 0.0
+            beta = rv / (rv + v + _RAVE_CONST + 1e-5)
+            exploit = (1.0 - beta) * mcts_val + beta * rave_val
+            explore = _UCB_C * math.sqrt(log_parent / (v + 1e-5))
             s = exploit + explore
             if s > best_score:
                 best_score = s
@@ -121,17 +141,11 @@ def _run_single_mcts_tree(
     max_simulations: int,
     time_limit: float,
     seed_offset: int = 0,
-) -> Dict[Tuple[int, int, int, int], Dict[str, float]]:
-    """在独立进程/线程中执行一棵完整的 MCTS 搜索树。
-
-    Args:
-        board: 棋盘副本（调用方必须保证独立拥有，函数结束后状态不变）。
-        max_simulations: 该 worker 分配到的最大模拟次数。
-        time_limit: 搜索时间上限（秒）。
-        seed_offset: 随机种子偏移，保证各 worker 的走法洗牌不同。
+) -> Dict[Move4, Dict[str, float]]:
+    """在独立进程/线程中执行一棵完整的 MCTS-RAVE 搜索树。
 
     Returns:
-        ``{move: {"visits": V, "wins": W}}``——根节点下每个子节点的统计。
+        ``{move: {"visits": V, "wins": W, "rave_visits": RV, "rave_wins": RW}}``
     """
     random.seed(time.time_ns() + seed_offset)
     t0 = time.time()
@@ -141,7 +155,7 @@ def _run_single_mcts_tree(
     root = MCTSNode(state_hash=board.zobrist_hash, player_just_moved=opp_of_root)
     root.ensure_moves(board)
 
-    move_stack: List[Tuple[Tuple[int, int, int, int], Any]] = []
+    move_stack: List[Tuple[Move4, Any]] = []
     sims_done = 0
 
     while sims_done < max_simulations:
@@ -149,6 +163,7 @@ def _run_single_mcts_tree(
             break
 
         node = root
+        path: List[MCTSNode] = [root]
 
         # ── Selection ──
         while node.is_fully_expanded() and node.children:
@@ -156,6 +171,7 @@ def _run_single_mcts_tree(
             node = node.best_child_ucb(log_n)
             captured = board.apply_move(*node.move)
             move_stack.append((node.move, captured))
+            path.append(node)
 
         # ── Expansion ──
         node.ensure_moves(board)
@@ -164,27 +180,32 @@ def _run_single_mcts_tree(
             child = _expand_one(board, node, move_stack)
             if child is not None:
                 node = child
+                path.append(node)
                 expanded = True
 
         if not expanded and not node.children and node.visits > 0:
-            result = _terminal_score(board, root_player)
+            result, red_moves, black_moves = _terminal_score(board, root_player), set(), set()
         else:
             # ── Simulation ──
-            result = _simulate(board, root_player)
+            result, red_moves, black_moves = _simulate(board, root_player)
 
-        # ── Backpropagation ──
-        _backpropagate(node, result)
+        # ── Backpropagation (with RAVE/AMAF) ──
+        _backpropagate(path, result, red_moves, black_moves)
         sims_done += 1
 
         while move_stack:
             mv, cap = move_stack.pop()
             board.undo_move(*mv, cap)
 
-    # 收集根节点子节点统计
-    child_stats: Dict[Tuple[int, int, int, int], Dict[str, float]] = {}
+    child_stats: Dict[Move4, Dict[str, float]] = {}
     for ch in root.children:
         if ch.move is not None:
-            child_stats[ch.move] = {"visits": ch.visits, "wins": ch.wins}
+            child_stats[ch.move] = {
+                "visits": ch.visits,
+                "wins": ch.wins,
+                "rave_visits": ch.rave_visits,
+                "rave_wins": ch.rave_wins,
+            }
     return child_stats
 
 
@@ -194,7 +215,7 @@ def _run_single_mcts_tree(
 def _expand_one(
     board: Board,
     node: MCTSNode,
-    move_stack: List[Tuple[Tuple[int, int, int, int], Any]],
+    move_stack: List[Tuple[Move4, Any]],
 ) -> Optional[MCTSNode]:
     """从 ``node.untried_moves`` 弹出一个合法走法并创建子节点。"""
     mover = board.current_player
@@ -216,51 +237,50 @@ def _expand_one(
     return None
 
 
-def _simulate(board: Board, root_player: str) -> float:
-    """轻量级模拟（Lightweight Rollout）。
+def _simulate(
+    board: Board, root_player: str,
+) -> Tuple[float, Set[Move4], Set[Move4]]:
+    """轻量级模拟（Lightweight Rollout），同时收集双方着法集合供 RAVE 使用。
 
-    与 Selection / Expansion 阶段不同，模拟阶段使用以下激进优化：
-
-    - **O(1) 终局检测**：不调用 ``Rules.winner()``（其内部做全量合法走法生成,
-      占 profile 90% 时间）。改为每步开头检测对方老将是否仍处于被将军状态——
-      若前一步行棋方未解将 / 主动送将，则对方可视为"吃将"获胜。
-    - **伪合法走法**：使用 ``get_pseudo_legal_moves``（几何 + 颜色过滤），
-      不调用 ``is_valid_move`` / ``is_king_in_check`` 逐着校验。
-    - **吃将一击必杀**：生成走法后，先扫描对方老将坐标是否可达；
-      如有可直接吃将的着法，立即执行并返回结果，终止模拟。
-    - **零合法性选择**：普通着法随机选取（吃子优先）后直接 apply_move，
-      不做自将 / 白脸将检查。由下一步的终局检测兜底。
+    Returns:
+        ``(result, red_moves, black_moves)``——胜率分数及双方在模拟中尝试的着法集合。
     """
     sim_board = board.copy()
     b_grid = sim_board.board
     rollout_limit = _dynamic_rollout_limit(sim_board.piece_count())
+    red_moves: Set[Move4] = set()
+    black_moves: Set[Move4] = set()
 
     for _ in range(rollout_limit):
         cp = sim_board.current_player
         opp = "black" if cp == "red" else "red"
 
-        # O(1)-ish 终局检测：前一步行棋方若送将 / 未解将，对方老将处于被将军状态
-        # → 当前行棋方可"吃将"获胜。单次 is_king_in_check ≈ 6μs，远低于 winner() 的 1.2ms。
         if Rules.is_king_in_check(sim_board, opp):
-            return 1.0 if cp == root_player else 0.0
+            return (1.0 if cp == root_player else 0.0), red_moves, black_moves
 
         moves = list(Rules.get_pseudo_legal_moves(sim_board, cp))
         if not moves:
-            return 0.0 if cp == root_player else 1.0
+            return (0.0 if cp == root_player else 1.0), red_moves, black_moves
 
-        # 吃将一击必杀：扫描对方老将坐标，若有直达着法立即终止模拟
         opp_king = sim_board.black_king_pos if cp == "red" else sim_board.red_king_pos
         if opp_king is not None:
             okr, okc = opp_king
             king_cap = _find_king_capture(sim_board, cp, b_grid, okr, okc)
             if king_cap is not None:
                 sim_board.apply_move(*king_cap)
-                return 1.0 if cp == root_player else 0.0
+                if cp == "red":
+                    red_moves.add(king_cap)
+                else:
+                    black_moves.add(king_cap)
+                return (1.0 if cp == root_player else 0.0), red_moves, black_moves
 
-        # 启发式随机走子（无合法性校验）
-        _pick_rollout_move_fast(sim_board, moves, b_grid)
+        chosen = _pick_rollout_move_fast(sim_board, moves, b_grid)
+        if cp == "red":
+            red_moves.add(chosen)
+        else:
+            black_moves.add(chosen)
 
-    return _eval_to_winrate(sim_board, root_player)
+    return _eval_to_winrate(sim_board, root_player), red_moves, black_moves
 
 
 def _find_king_capture(
@@ -269,12 +289,8 @@ def _find_king_capture(
     b_grid,
     tkr: int,
     tkc: int,
-) -> Optional[Tuple[int, int, int, int]]:
-    """单目标可达性：检查 ``attacker`` 方是否有棋子可直接吃到 ``(tkr, tkc)`` 处的老将。
-
-    仅做几何 + 蹩腿判定，不做完整合法性校验（模拟阶段专用）。
-    ``get_pseudo_legal_moves`` 会过滤掉吃将着法，因此需要此独立检测。
-    """
+) -> Optional[Move4]:
+    """单目标可达性：检查 ``attacker`` 方是否有棋子可直接吃到 ``(tkr, tkc)`` 处的老将。"""
     for r, c in board.active_pieces[attacker]:
         p = b_grid[r][c]
         if p is None:
@@ -321,20 +337,17 @@ def _find_king_capture(
 
 def _pick_rollout_move_fast(
     sim_board: Board,
-    moves: List[Tuple[int, int, int, int]],
+    moves: List[Move4],
     b_grid,
-) -> None:
-    """零校验启发式走子：吃子优先，直接 apply_move，不做合法性检查。
-
-    非法状态（自将 / 白脸将）由下一步的终局检测兜底。
-    使用 ``random.choice`` 而非 ``random.shuffle`` 以节省 O(n) 开销。
-    """
+) -> Move4:
+    """零校验启发式走子：吃子优先，直接 apply_move，返回所选着法供 RAVE 记录。"""
     captures = [m for m in moves if b_grid[m[2]][m[3]] is not None]
     if captures and random.random() < _CAPTURE_PROB:
         m = random.choice(captures)
     else:
         m = random.choice(moves)
     sim_board.apply_move(*m)
+    return m
 
 
 def _eval_to_winrate(board: Board, root_player: str) -> float:
@@ -354,13 +367,37 @@ def _terminal_score(board: Board, root_player: str) -> float:
     return 0.5
 
 
-def _backpropagate(node: MCTSNode, result: float) -> None:
-    while node is not None:
+def _backpropagate(
+    path: List[MCTSNode],
+    result: float,
+    red_moves: Set[Move4],
+    black_moves: Set[Move4],
+) -> None:
+    """反向传播 + AMAF/RAVE 更新。
+
+    沿 path（从叶到根）回传 result（每层翻转视角），同时对每个节点的所有已展开
+    子节点做 RAVE 更新：若子节点的 move 出现在对应颜色的模拟着法集合中，
+    则累加该子节点的 rave_visits / rave_wins。
+    """
+    score = result
+    for i in range(len(path) - 1, -1, -1):
+        node = path[i]
         node.visits += 1
         if node.player_just_moved is not None:
-            node.wins += result
-        node = node.parent
-        result = 1.0 - result
+            node.wins += score
+
+        for child in node.children:
+            if child.move is None:
+                continue
+            pjm = child.player_just_moved
+            if pjm == "red" and child.move in red_moves:
+                child.rave_visits += 1
+                child.rave_wins += score
+            elif pjm == "black" and child.move in black_moves:
+                child.rave_visits += 1
+                child.rave_wins += score
+
+        score = 1.0 - score
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -369,7 +406,7 @@ def _backpropagate(node: MCTSNode, result: float) -> None:
 
 
 class MCTSAI:
-    """中国象棋蒙特卡洛树搜索 AI（支持多进程根节点并行）。
+    """中国象棋蒙特卡洛树搜索 AI（支持多进程根节点并行 + RAVE）。
 
     对外接口与 ``MinimaxAI`` 一致：``get_best_move`` / ``choose_move``。
 
@@ -393,7 +430,7 @@ class MCTSAI:
         self.verbose = verbose
         if workers is None:
             try:
-                self.workers = min(8, multiprocessing.cpu_count())
+                self.workers = min(4, multiprocessing.cpu_count())
             except NotImplementedError:
                 self.workers = 1
         else:
@@ -406,7 +443,7 @@ class MCTSAI:
         board: Board,
         time_limit: Optional[float] = None,
         game_history: Optional[List[int]] = None,
-    ) -> Optional[Tuple[int, int, int, int]]:
+    ) -> Optional[Move4]:
         """Searcher 统一接口。"""
         return self.get_best_move(board, time_limit=time_limit, game_history=game_history)
 
@@ -416,19 +453,14 @@ class MCTSAI:
         game_history: Optional[List[int]] = None,
         time_limit: Optional[float] = None,
         max_simulations: Optional[int] = None,
-    ) -> Optional[Tuple[int, int, int, int]]:
-        """执行 MCTS 搜索并返回最佳走法。
-
-        当 ``workers > 1`` 时采用多进程根节点并行：每个 worker 独立建树，
-        搜索完成后在主进程合并各棵树根节点的子节点统计（visits / wins）。
-        """
+    ) -> Optional[Move4]:
+        """执行 MCTS-RAVE 搜索并返回最佳走法。"""
         tl = time_limit if time_limit is not None else self.time_limit
         ms = max_simulations if max_simulations is not None else self.max_simulations
         t0 = time.time()
 
         effective_workers = self.workers
         if effective_workers <= 1 or ms < effective_workers * 10:
-            # 单进程路径（避免极小模拟量下的进程启动开销）
             merged = _run_single_mcts_tree(board, ms, tl, seed_offset=0)
             total_sims = sum(int(s["visits"]) for s in merged.values())
         else:
@@ -441,7 +473,7 @@ class MCTSAI:
         elapsed = time.time() - t0
         self.simulations_run = total_sims
 
-        best_move: Optional[Tuple[int, int, int, int]] = None
+        best_move: Optional[Move4] = None
         best_visits = -1
         best_wr = 0.0
         for mv, st in merged.items():
@@ -470,8 +502,8 @@ class MCTSAI:
         sims_per_worker: int,
         remainder: int,
         num_workers: int,
-    ) -> Dict[Tuple[int, int, int, int], Dict[str, float]]:
-        """多进程根节点并行搜索并合并结果。"""
+    ) -> Dict[Move4, Dict[str, float]]:
+        """多进程根节点并行搜索并合并结果（含 RAVE 统计）。"""
         futures = []
         with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as pool:
             for i in range(num_workers):
@@ -488,13 +520,19 @@ class MCTSAI:
                 )
             results = [f.result() for f in futures]
 
-        # 合并各棵树的子节点统计
-        merged: Dict[Tuple[int, int, int, int], Dict[str, float]] = {}
+        merged: Dict[Move4, Dict[str, float]] = {}
         for child_stats in results:
             for mv, st in child_stats.items():
                 if mv in merged:
                     merged[mv]["visits"] += st["visits"]
                     merged[mv]["wins"] += st["wins"]
+                    merged[mv]["rave_visits"] += st["rave_visits"]
+                    merged[mv]["rave_wins"] += st["rave_wins"]
                 else:
-                    merged[mv] = {"visits": st["visits"], "wins": st["wins"]}
+                    merged[mv] = {
+                        "visits": st["visits"],
+                        "wins": st["wins"],
+                        "rave_visits": st["rave_visits"],
+                        "rave_wins": st["rave_wins"],
+                    }
         return merged
