@@ -864,6 +864,9 @@ def _simulate_or_probe(
         cp = sim_board.current_player
         opp = "black" if cp == "red" else "red"
 
+        if Rules.is_move_limit_draw(hist):
+            return 0.5, red_moves, black_moves
+
         st_pf, _off_pf = Rules.perpetual_check_status(sim_board, hist)
         if st_pf == "forfeit" and _off_pf is not None:
             w_pf = "black" if _off_pf == "red" else "red"

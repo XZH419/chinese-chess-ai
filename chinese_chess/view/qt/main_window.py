@@ -44,6 +44,7 @@ from chinese_chess.algorithm.mcts import MCTSAI
 from chinese_chess.algorithm.mcts_minimax import MCTSMinimaxAI
 from chinese_chess.algorithm.random_ai import RandomAI
 from chinese_chess.control.controller import GameController, MoveOutcome
+from chinese_chess.model.rules import Rules
 
 
 Move = Tuple[int, int, int, int]
@@ -902,12 +903,23 @@ class MainWindow(QMainWindow):
         if outcome.perpetual_warning and not outcome.game_over:
             off = outcome.perpetual_offender
             who = "红方" if off == "red" else "黑方" if off else "某方"
-            wtxt = f"⚠ 长将警告：{who}持续将军；第三次出现相同局面将判负。"
-            self.append_log(wtxt)
-            self.status_label.setText(wtxt)
+            wtxt = f"长将警告：{who}持续将军；第三次出现相同局面将判负。"
+            self.append_log(f"⚠ {wtxt}")
+            self.status_label.setText(f"⚠ {wtxt}")
+            QMessageBox.warning(self, "长将警告", wtxt)
 
         if outcome.game_over:
             self._run_id += 1
+            if outcome.move_limit_draw:
+                msg = (
+                    f"游戏结束：已达 {Rules.MAX_PLIES_AUTODRAW} 手限着（半回合计），和棋。"
+                )
+                self.append_log(msg)
+                self.append_log("==========================")
+                self.status_label.setText(msg)
+                QMessageBox.information(self, "对局结束", msg)
+                self._game_over_ui()
+                return
             if outcome.perpetual_forfeit:
                 side = "红" if outcome.winner == "red" else "黑"
                 msg = f"游戏结束：长将判负，{side}方获胜！"

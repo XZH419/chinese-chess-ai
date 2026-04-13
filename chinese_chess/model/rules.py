@@ -6,7 +6,7 @@
 - **走法生成**：
   - ``get_all_moves`` / ``get_legal_moves``：完整合法走法（自将、飞将等）
   - ``get_pseudo_legal_moves``：伪合法走法（仅几何规则，供 AI 搜索用）
-- **终局判定**：将被吃掉、无子可走（困毙/将死）、长将（第 2 次同形警告 / 第 3 次判负）
+- **终局判定**：将被吃掉、无子可走（困毙/将死）、长将（第 2 次同形警告 / 第 3 次判负）、限着手数和棋
 
 注意：
 - 所有方法均为静态方法，避免有状态耦合
@@ -66,12 +66,15 @@ class Rules:
     - 棋子几何走法验证（将、士、象、马、车、炮、兵各有专用方法）
     - 完整合法性校验（含将军检测、白脸将检测；长将方负由终局判定）
     - 走法生成（完整合法走法与伪合法走法两种模式）
-    - 终局判定（将死、困毙、长将第三次判负）
+    - 终局判定（将死、困毙、长将第三次判负、限着手数和棋）
 
     设计为纯静态类的原因：规则本身不持有状态，所有判定都基于传入的
     ``Board`` 对象进行，这使得规则逻辑可以在 Minimax、MCTS 等不同
     算法间无状态地复用。
     """
+
+    # 自开局起累计半回合数（每步棋一手，不含 history[0] 占位）达到此值则强制和棋
+    MAX_PLIES_AUTODRAW: int = 150
 
     # 四个正交方向偏移量（用于车 / 炮 / 将军射线扫描）
     _ORTH_DELTAS: Tuple[Tuple[int, int], ...] = (
@@ -112,6 +115,13 @@ class Rules:
         if abs(sr - er) == 2:
             return (sr + er) // 2, sc
         return sr, (sc + ec) // 2
+
+    @staticmethod
+    def is_move_limit_draw(move_history: Optional[List[MoveEntry]]) -> bool:
+        """是否已达限着手数：``len(move_history) - 1 >= MAX_PLIES_AUTODRAW``（半回合计数）。"""
+        if not move_history:
+            return False
+        return len(move_history) - 1 >= Rules.MAX_PLIES_AUTODRAW
 
     @staticmethod
     def _perpetual_offending_side_in_cycle(cycle: List[MoveEntry]) -> Optional[str]:
@@ -923,10 +933,11 @@ class Rules:
         """判断当前局面的胜者。
 
         判负规则：
-        1. **将/帅被吃**：将/帅不在棋盘上的一方判负
-        2. **长将第三次**：``perpetual_check_status`` 为 ``forfeit`` 时，
+        1. **限着手数和棋**：达到 ``MAX_PLIES_AUTODRAW`` 半回合时返回 ``None``（和棋）
+        2. **将/帅被吃**：将/帅不在棋盘上的一方判负
+        3. **长将第三次**：``perpetual_check_status`` 为 ``forfeit`` 时，
            长将方判负（胜方为对手）
-        3. **困毙/将死**：轮到走子但无任何合法走法的一方判负
+        4. **困毙/将死**：轮到走子但无任何合法走法的一方判负
 
         Args:
             board: 当前棋盘状态。
@@ -936,6 +947,8 @@ class Rules:
             胜者颜色字符串（``"red"`` 或 ``"black"``），
             未分胜负时返回 ``None``。
         """
+        if move_history is not None and Rules.is_move_limit_draw(move_history):
+            return None
 
         # 第一步：检查将/帅是否还在棋盘上
         # 利用 Board 维护的将帅坐标进行 O(1) 判定，替代 O(90) 全盘扫描。
@@ -966,5 +979,7 @@ class Rules:
     def is_game_over(
         board: Board, move_history: Optional[List[MoveEntry]] = None
     ) -> bool:
-        """若 ``winner(...)`` 已能判定胜负（含长将判负），返回 ``True``。"""
+        """终局：限着手数和棋、或 ``winner`` 已能分出胜负（含长将判负）。"""
+        if move_history is not None and Rules.is_move_limit_draw(move_history):
+            return True
         return Rules.winner(board, move_history) is not None

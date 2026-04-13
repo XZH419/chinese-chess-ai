@@ -831,6 +831,8 @@ class MinimaxAI:
         Returns:
             当前行棋方视角的评估分数（分越高越好）。
         """
+        if len(self._move_history_stack) - 1 >= Rules.MAX_PLIES_AUTODRAW:
+            return 0.0
         rep = self._is_repeated(board, skip_rep_count=skip_rep_count)
         if rep is not None:
             return rep
@@ -964,6 +966,8 @@ class MinimaxAI:
             SearchTimeoutException: 搜索超时时抛出，由迭代加深框架捕获后
                 回退到上一完整迭代层的结果。
         """
+        if len(self._move_history_stack) - 1 >= Rules.MAX_PLIES_AUTODRAW:
+            return 0.0
         rep = self._is_repeated(board, skip_rep_count=skip_rep_count)
         if rep is not None:
             return rep

@@ -133,6 +133,7 @@ class MoveOutcome:
         perpetual_warning: 本步后触发长将第二次同形警告（对局继续）。
         perpetual_forfeit: 本步后长将第三次判负导致终局。
         perpetual_offender: 长将方颜色（``warning`` / ``forfeit`` 时有效）。
+        move_limit_draw: 本步后达到限着手数（``Rules.MAX_PLIES_AUTODRAW``）和棋。
     """
 
     ok: bool
@@ -143,6 +144,7 @@ class MoveOutcome:
     perpetual_warning: bool = False
     perpetual_forfeit: bool = False
     perpetual_offender: Optional[str] = None
+    move_limit_draw: bool = False
 
 
 class GameController:
@@ -283,6 +285,7 @@ class GameController:
         pst, poff = Rules.perpetual_check_status(self.board, self.history)
         p_warn = pst == "warning"
         p_ff = pst == "forfeit"
+        mld = Rules.is_move_limit_draw(self.history)
         over = Rules.is_game_over(self.board, move_history=self.history)
         win: Optional[str] = Rules.winner(self.board, self.history) if over else None
         return MoveOutcome(
@@ -293,6 +296,7 @@ class GameController:
             perpetual_warning=p_warn,
             perpetual_forfeit=p_ff,
             perpetual_offender=poff if pst != "none" else None,
+            move_limit_draw=mld,
         )
 
     def undo_move(self, move: Tuple[int, int, int, int], captured) -> None:
