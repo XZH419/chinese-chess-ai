@@ -949,21 +949,16 @@ class Rules:
         """
 
         # 第一步：检查将/帅是否还在棋盘上
-        red_jiang = any(
-            piece and piece.color == "red" and piece.piece_type == "jiang"
-            for row in board.board
-            for piece in row
-        )
-        black_jiang = any(
-            piece and piece.color == "black" and piece.piece_type == "jiang"
-            for row in board.board
-            for piece in row
-        )
-        if not red_jiang and black_jiang:
+        # 利用 Board 维护的将帅坐标进行 O(1) 判定，替代 O(90) 全盘扫描。
+        # red_king_pos / black_king_pos 由 apply_move / undo_move 增量维护，
+        # 被吃后置为 None，与全盘扫描结果严格等价。
+        is_red_king_alive = board.red_king_pos is not None
+        is_black_king_alive = board.black_king_pos is not None
+        if not is_red_king_alive and is_black_king_alive:
             return "black"
-        if not black_jiang and red_jiang:
+        if not is_black_king_alive and is_red_king_alive:
             return "red"
-        if not red_jiang and not black_jiang:
+        if not is_red_king_alive and not is_black_king_alive:
             # 理论上不应出现双方将帅同时消失，保守返回 None
             return None
 
