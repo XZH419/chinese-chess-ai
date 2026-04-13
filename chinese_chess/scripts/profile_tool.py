@@ -278,27 +278,27 @@ def cmd_profile_mcts(args: argparse.Namespace) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  子命令三：mcts_minimax（混合搜索性能分析）
+#  子命令三：mcts_minimax（MCTS-Minimax 搜索性能分析）
 # ═══════════════════════════════════════════════════════════════
 
 
 def cmd_profile_mcts_minimax(args: argparse.Namespace) -> None:
-    """MCTS+Minimax 混合单树性能分析：调用 ``_run_single_hybrid_tree``。"""
+    """MCTS-Minimax 单树性能分析：调用 ``_run_single_mcts_minimax_tree``。"""
     from chinese_chess.model.board import Board
-    from chinese_chess.algorithm.mcts_minimax import _run_single_hybrid_tree
+    from chinese_chess.algorithm.mcts_minimax import _run_single_mcts_minimax_tree
 
     sims = args.simulations
     top_n = args.top
 
     board = Board()
-    print(f"[混合引擎性能分析] 初始局面子力数: {board.piece_count()}")
-    print(f"[混合引擎性能分析] cProfile: max_simulations={sims}, time_limit=999")
+    print(f"[MCTS-Minimax 性能分析] 初始局面子力数: {board.piece_count()}")
+    print(f"[MCTS-Minimax 性能分析] cProfile: max_simulations={sims}, time_limit=999")
     print()
 
     profiler = cProfile.Profile()
     profiler.enable()
 
-    child_stats, probe_stats = _run_single_hybrid_tree(
+    child_stats, probe_stats = _run_single_mcts_minimax_tree(
         board=board,
         max_simulations=sims,
         time_limit=999.0,
@@ -323,7 +323,7 @@ def cmd_profile_mcts_minimax(args: argparse.Namespace) -> None:
     print(stream.getvalue())
 
     print("=" * 72)
-    print("混合引擎性能分析完成。")
+    print("MCTS-Minimax 性能分析完成。")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -357,13 +357,13 @@ def main() -> None:
     p_mcts.add_argument("--top", type=int, default=30, help="打印热点条数（默认 30）")
     p_mcts.set_defaults(func=cmd_profile_mcts)
 
-    p_hybrid = subparsers.add_parser(
+    p_mcts_minimax = subparsers.add_parser(
         "mcts_minimax",
-        help="MCTS+Minimax 混合单核性能分析（默认 1500 次模拟）",
+        help="MCTS-Minimax 单核性能分析（默认 1500 次模拟）",
     )
-    p_hybrid.add_argument("--simulations", type=int, default=1500, help="模拟次数（默认 1500）")
-    p_hybrid.add_argument("--top", type=int, default=30, help="打印热点条数（默认 30）")
-    p_hybrid.set_defaults(func=cmd_profile_mcts_minimax)
+    p_mcts_minimax.add_argument("--simulations", type=int, default=1500, help="模拟次数（默认 1500）")
+    p_mcts_minimax.add_argument("--top", type=int, default=30, help="打印热点条数（默认 30）")
+    p_mcts_minimax.set_defaults(func=cmd_profile_mcts_minimax)
 
     args = parser.parse_args()
     args.func(args)

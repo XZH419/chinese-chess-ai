@@ -633,7 +633,7 @@ def _pick_rollout_move_fast(
     """分级 forcing-first rollout：将 / 将军 / 高价值吃子 / 吃子 / 推进 / 随机。
 
     不调用 ``Evaluation.evaluate``；吃子价值仅用 ``Evaluation.PIECE_VALUES``。
-    返回 ``(move, 是否为吃子)``，后者供 hybrid 侧 probe 触发等逻辑使用。
+    返回 ``(move, 是否为吃子)``，后者供 ``mcts_minimax`` 模块中 probe 触发等逻辑使用。
     """
     cp = sim_board.current_player
     pv = Evaluation.PIECE_VALUES

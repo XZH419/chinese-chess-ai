@@ -47,9 +47,9 @@ def describe_player_agent(agent: Optional[Any]) -> str:
         sims = getattr(agent, "max_simulations", None)
         w = getattr(agent, "workers", 1)
         return (
-            f"Hybrid(MCTS+Minimax), Sims={sims}, Workers={w}"
+            f"MCTS-Minimax, Sims={sims}, Workers={w}"
             if sims is not None
-            else "Hybrid(MCTS+Minimax)"
+            else "MCTS-Minimax"
         )
     return cls
 

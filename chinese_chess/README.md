@@ -8,7 +8,7 @@ A complete Chinese Chess (Xiangqi) AI implementation with rule framework, AI alg
 - Random AI for testing
 - Minimax AI with alpha-beta pruning
 - MCTS (Monte Carlo Tree Search) AI
-- **MCTS+Minimax hybrid** (`MCTSMinimaxAI`): MCTS 全局探索 + 叶节点浅层 Minimax 战术精算
+- **MCTS-Minimax** (`MCTSMinimaxAI` in `algorithm/mcts_minimax.py`): MCTS 全局探索 + 叶节点浅层 Minimax 战术精算
 - Heuristic evaluation function with piece values and position bonuses
 - Opening and endgame book support
 - PyQt5 graphical user interface
@@ -59,7 +59,7 @@ chinese-chess/
 1. **Random AI**: Selects random valid moves for testing
 2. **Minimax**: Depth-limited search with alpha-beta pruning
 3. **MCTS**: Monte Carlo Tree Search with UCB selection
-4. **MCTS+Minimax (Hybrid)**: `MCTSMinimaxAI` in `algorithm/mcts_minimax.py` — same `choose_move` / `get_best_move` API as other engines
+4. **MCTS-Minimax**: `MCTSMinimaxAI` — same `choose_move` / `get_best_move` API as other engines; CLI / benchmark key: `mcts_minimax`
 
 CLI examples::
 

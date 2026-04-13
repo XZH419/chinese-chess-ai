@@ -439,7 +439,7 @@ class MainWindow(QMainWindow):
         "Random (随机)",
         "Minimax (极大极小)",
         "MCTS (蒙特卡洛)",
-        "MCTS+Minimax (混合)",
+        "MCTS-Minimax",
     ]
     _IDX_HUMAN, _IDX_RANDOM, _IDX_MINIMAX, _IDX_MCTS, _IDX_MCTS_MINIMAX = 0, 1, 2, 3, 4
 
@@ -820,7 +820,7 @@ class MainWindow(QMainWindow):
         if cls == "MCTSMinimaxAI":
             s = getattr(agent, "max_simulations", None)
             w = getattr(agent, "workers", 1)
-            return f"Hybrid {s}sims/{w}w" if s else "Hybrid"
+            return f"MCTS-Minimax {s}sims/{w}w" if s else "MCTS-Minimax"
         if cls == "RandomAI":
             return "Random"
         return cls
@@ -1052,7 +1052,7 @@ class MainWindow(QMainWindow):
             elif stats.get("random"):
                 self._log_random_stats(stats)
             elif stats.get("probe_count") is not None and not stats.get("opening_book"):
-                self._log_hybrid_stats(stats)
+                self._log_mcts_minimax_stats(stats)
             elif stats.get("simulations") is not None:
                 self._log_mcts_stats(stats)
             else:
@@ -1101,14 +1101,14 @@ class MainWindow(QMainWindow):
         if win_rate:
             self.append_log(f"当前胜率: {win_rate}")
 
-    def _log_hybrid_stats(self, stats: dict) -> None:
-        """将 MCTS+Minimax 混合搜索的统计信息写入日志。"""
+    def _log_mcts_minimax_stats(self, stats: dict) -> None:
+        """将 MCTS-Minimax 搜索的统计信息写入日志。"""
         time_taken = stats.get("time_taken", 0)
         time_str = (
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
         )
         self.append_log(f"搜索耗时 (秒): {time_str}")
-        self.append_log(f"混合引擎 模拟次数: {stats.get('simulations', 0)}")
+        self.append_log(f"MCTS-Minimax 模拟次数: {stats.get('simulations', 0)}")
         self.append_log(f"并行 Workers: {stats.get('workers', 1)}")
         win_rate = stats.get("win_rate", "")
         if win_rate:

@@ -22,34 +22,35 @@ from chinese_chess.model.rules import Rules
 
 MAX_MOVES = 150  # 单方步数上限（着法数），超过判和
 
-_AI_CHOICES = ["minimax", "mcts", "mcts_minimax", "mcts_minmax", "hybrid", "random"]
+_AI_KIND_ALLOWED = frozenset({"minimax", "mcts", "mcts_minimax", "random"})
+_LEGACY_TO_MCTS_MINIMAX = frozenset({"hybrid", "mcts_minmax"})
 
 
 def _normalize_engine(name: str) -> str:
     k = name.strip().lower().replace("-", "_")
-    if k in ("hybrid", "mcts_minmax"):
+    if k in _LEGACY_TO_MCTS_MINIMAX:
         return "mcts_minimax"
     return k
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="无头 AI 对弈基准（支持 Minimax / MCTS / MCTS+Minimax 混合 / Random）",
+        description="无头 AI 对弈基准（支持 Minimax / MCTS / MCTS-Minimax / Random）",
     )
     parser.add_argument("--games", type=int, default=10, help="对局数量")
     parser.add_argument(
         "--red-ai",
         type=str,
         default="minimax",
-        choices=_AI_CHOICES,
-        help="红方引擎（默认 minimax；hybrid / mcts_minmax 等价于 mcts_minimax）",
+        metavar="ENGINE",
+        help="红方引擎：minimax|mcts|mcts_minimax|random",
     )
     parser.add_argument(
         "--black-ai",
         type=str,
         default="minimax",
-        choices=_AI_CHOICES,
-        help="黑方引擎",
+        metavar="ENGINE",
+        help="黑方引擎：minimax|mcts|mcts_minimax|random",
     )
     parser.add_argument("--red-depth", type=int, default=3, dest="red_depth", help="红方 Minimax 搜索深度")
     parser.add_argument("--black-depth", type=int, default=3, dest="black_depth", help="黑方 Minimax 搜索深度")
@@ -58,14 +59,14 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=3000,
         dest="red_sims",
-        help="红方 MCTS / 混合引擎的 max_simulations（默认 3000）",
+        help="红方 MCTS / MCTS-Minimax 的 max_simulations（默认 3000）",
     )
     parser.add_argument(
         "--black-sims",
         type=int,
         default=3000,
         dest="black_sims",
-        help="黑方 MCTS / 混合引擎的 max_simulations",
+        help="黑方 MCTS / MCTS-Minimax 的 max_simulations",
     )
     parser.set_defaults(stochastic=True)
     parser.add_argument(
@@ -86,7 +87,15 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="每步搜索时间上限（秒），默认不限制",
     )
-    return parser.parse_args()
+    ns = parser.parse_args()
+    r = _normalize_engine(ns.red_ai)
+    b = _normalize_engine(ns.black_ai)
+    if r not in _AI_KIND_ALLOWED:
+        parser.error(f"未知的 --red-ai: {ns.red_ai!r}")
+    if b not in _AI_KIND_ALLOWED:
+        parser.error(f"未知的 --black-ai: {ns.black_ai!r}")
+    ns.red_ai, ns.black_ai = r, b
+    return ns
 
 
 def _winner_label(w: Optional[str]) -> str:
@@ -238,7 +247,7 @@ def main() -> None:
 | **黑方单步平均节点/模拟量** | {black_avg_n:.1f} |
 
 注：耗时与节点/模拟量来自各引擎每步搜索后的 ``last_stats``（Minimax 为 ``nodes_evaluated``，
-MCTS / 混合为 ``simulations`` 或与 ``nodes_evaluated`` 的合成字段）。
+MCTS / MCTS-Minimax 为 ``simulations`` 或与 ``nodes_evaluated`` 的合成字段）。
 """
     print(report)
 

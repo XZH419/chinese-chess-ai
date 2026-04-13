@@ -12,7 +12,7 @@
     # CLI 模式：MCTS vs Minimax
     python -m chinese_chess.main cli --red mcts --black minimax
 
-    # MCTS+Minimax 混合引擎（别名：hybrid、mcts_minmax、mcts-minmax）
+    # MCTS-Minimax 引擎
     python -m chinese_chess.main cli --red mcts_minimax --black minimax --red-sims 3000
 
 支持的玩家类型：
@@ -20,7 +20,9 @@
     - ``minimax``: 极大极小搜索 AI（可配置搜索深度）
     - ``random``: 随机走子 AI
     - ``mcts``: 蒙特卡洛树搜索 AI
-    - ``mcts_minimax`` / ``hybrid`` / ``mcts_minmax`` 等：MCTS 主干 + Minimax 局部精算
+    - ``mcts_minimax``: MCTS 主干 + Minimax 叶节点战术精算（统一名称）
+
+旧拼写（如 ``hybrid``、``mcts_minmax``）在解析时仍会规范为 ``mcts_minimax``。
 """
 
 import sys
@@ -31,28 +33,18 @@ import argparse
 # 用户从仓库根目录执行 `python chinese_chess/main.py` 时也能正常工作。
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-# 命令行可用的玩家类型（含常见别名，在 build 前会规范化为内部键）
-_AI_CHOICE_STRINGS = [
-    "human",
-    "minimax",
-    "random",
-    "mcts",
-    "mcts_minimax",
-    "mcts_minmax",
-    "hybrid",
-    "mcts-minimax",
-    "mcts-minmax",
-]
+_AI_KIND_ALLOWED = frozenset({"human", "minimax", "random", "mcts", "mcts_minimax"})
+
+# 已废弃的 CLI 写法 → 统一为 mcts_minimax（不改变算法，仅规范化）
+_LEGACY_AI_TO_MCTS_MINIMAX = frozenset({"hybrid", "mcts_minmax"})
 
 
 def _normalize_ai_kind(kind: str) -> str:
-    """将 CLI 别名统一为内部使用的引擎键。"""
+    """将 CLI 字符串规范为内部引擎键 ``mcts_minimax`` 等。"""
     k = kind.strip().lower().replace("-", "_")
-    aliases = {
-        "hybrid": "mcts_minimax",
-        "mcts_minmax": "mcts_minimax",
-    }
-    return aliases.get(k, k)
+    if k in _LEGACY_AI_TO_MCTS_MINIMAX:
+        return "mcts_minimax"
+    return k
 
 
 if __name__ == "__main__":
@@ -62,16 +54,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--red",
         type=str,
-        choices=_AI_CHOICE_STRINGS,
         default="human",
-        help="红方玩家类型（混合引擎可写 mcts_minimax / hybrid / mcts_minmax）",
+        metavar="KIND",
+        help="红方：human|minimax|random|mcts|mcts_minimax",
     )
     parser.add_argument(
         "--black",
         type=str,
-        choices=_AI_CHOICE_STRINGS,
         default="minimax",
-        help="黑方玩家类型",
+        metavar="KIND",
+        help="黑方：human|minimax|random|mcts|mcts_minimax",
     )
     parser.add_argument("--red-depth", type=int, default=3, help="红方为 Minimax 时的搜索深度（默认 3）")
     parser.add_argument("--black-depth", type=int, default=3, help="黑方为 Minimax 时的搜索深度（默认 3）")
@@ -79,16 +71,23 @@ if __name__ == "__main__":
         "--red-sims",
         type=int,
         default=5000,
-        help="红方为 MCTS / 混合引擎时的最大模拟次数（默认 5000）",
+        help="红方为 MCTS / MCTS-Minimax 时的最大模拟次数（默认 5000）",
     )
     parser.add_argument(
         "--black-sims",
         type=int,
         default=5000,
-        help="黑方为 MCTS / 混合引擎时的最大模拟次数（默认 5000）",
+        help="黑方为 MCTS / MCTS-Minimax 时的最大模拟次数（默认 5000）",
     )
 
     args = parser.parse_args()
+
+    red_k = _normalize_ai_kind(args.red)
+    black_k = _normalize_ai_kind(args.black)
+    if red_k not in _AI_KIND_ALLOWED:
+        parser.error(f"未知的 --red: {args.red!r}（允许: {sorted(_AI_KIND_ALLOWED)}）")
+    if black_k not in _AI_KIND_ALLOWED:
+        parser.error(f"未知的 --black: {args.black!r}（允许: {sorted(_AI_KIND_ALLOWED)}）")
 
     from chinese_chess.control.controller import GameController, format_matchup_line
     from chinese_chess.algorithm.random_ai import RandomAI
@@ -102,7 +101,7 @@ if __name__ == "__main__":
         Args:
             kind: 规范化后的玩家类型（``mcts_minimax``、``minimax`` 等）。
             depth: Minimax 搜索深度。
-            sims: MCTS / 混合引擎的 ``max_simulations``。
+            sims: MCTS / MCTS-Minimax 的 ``max_simulations``。
 
         Returns:
             AI 代理实例；若为 ``'human'`` 则返回 ``None``。
@@ -123,8 +122,6 @@ if __name__ == "__main__":
             )
         raise ValueError(f"unknown player kind: {kind!r}")
 
-    red_k = _normalize_ai_kind(args.red)
-    black_k = _normalize_ai_kind(args.black)
     red_agent = build_agent(red_k, depth=args.red_depth, sims=args.red_sims)
     black_agent = build_agent(black_k, depth=args.black_depth, sims=args.black_sims)
 
