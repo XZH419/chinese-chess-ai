@@ -328,7 +328,7 @@ class MCTSAI:
         self.verbose = verbose
         if workers is None:
             try:
-                self.workers = min(4, multiprocessing.cpu_count())
+                self.workers = min(8, multiprocessing.cpu_count())
             except NotImplementedError:
                 self.workers = 1
         else:
