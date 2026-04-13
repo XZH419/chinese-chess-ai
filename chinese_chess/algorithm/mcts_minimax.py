@@ -50,6 +50,11 @@ from chinese_chess.model.board import Board
 from chinese_chess.model.rules import Rules
 
 from .evaluation import Evaluation
+from .search_move_helpers import (
+    MoveGivesCheckCache,
+    PostApplyFlagsCache,
+    apply_pseudo_legal_with_rule_cache,
+)
 from .opening_book import OPENING_BOOK, mirror_move
 from .mcts import (
     _policy_attack_bias,
@@ -252,13 +257,17 @@ class MCTSMinimaxNode:
         self.rave_visits: int = 0
         self.rave_wins: float = 0.0
 
-    def ensure_moves(self, board: Board) -> None:
+    def ensure_moves(
+        self,
+        board: Board,
+        gives_check_cache: Optional[MoveGivesCheckCache] = None,
+    ) -> None:
         """惰性初始化 untried_moves。"""
         if self.untried_moves is None:
             self.untried_moves = list(
                 Rules.get_pseudo_legal_moves(board, board.current_player)
             )
-            _order_untried_moves_policy(board, self.untried_moves)
+            _order_untried_moves_policy(board, self.untried_moves, gives_check_cache)
 
     def is_fully_expanded(self) -> bool:
         return self.untried_moves is not None and len(self.untried_moves) == 0
@@ -444,10 +453,16 @@ def _probe_qs(
 
     for move in captures:
         mover = board.current_player
-        captured = board.apply_move(*move)
-        if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
-            board.undo_move(*move, captured)
+        applied = apply_pseudo_legal_with_rule_cache(
+            board,
+            move,
+            mover,
+            pre_move_cache=probe_state["pre_move_cache"],
+            post_apply_cache=probe_state["post_apply_cache"],
+        )
+        if applied is None:
             continue
+        captured, _ = applied
         score = -_probe_qs(board, -beta, -alpha, qs_depth - 1, probe_state)
         board.undo_move(*move, captured)
         if score >= beta:
@@ -508,17 +523,22 @@ def _probe_negamax(
 
     for move in moves:
         mover = board.current_player
-        captured = board.apply_move(*move)
-        if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
-            board.undo_move(*move, captured)
+        applied = apply_pseudo_legal_with_rule_cache(
+            board,
+            move,
+            mover,
+            pre_move_cache=probe_state["pre_move_cache"],
+            post_apply_cache=probe_state["post_apply_cache"],
+        )
+        if applied is None:
             continue
+        captured, opp_in_check = applied
         has_legal = True
 
         # 将军延伸：走后对手被将时不消耗深度
-        child_player = board.current_player
         next_depth = depth - 1
         next_ext = check_ext_left
-        if Rules.is_king_in_check(board, child_player) and check_ext_left > 0:
+        if opp_in_check and check_ext_left > 0:
             next_depth = depth
             next_ext = check_ext_left - 1
 
@@ -801,6 +821,8 @@ def _simulate_or_probe(
     probe_state: dict,
     sims_done: int,
     node_visits: int = 0,
+    *,
+    gives_check_cache: Optional[MoveGivesCheckCache] = None,
 ) -> Tuple[float, Set[Move4], Set[Move4]]:
     """轻量级伪合法 rollout + 分级选择性 minimax probe。
 
@@ -812,6 +834,9 @@ def _simulate_or_probe(
     - **Level 2** — 标准 probe（depth 2~4, QS depth 4, 含将军延伸）。
 
     probe 触发受 ``ProbeBudget`` 的调用次数上限、节点上限和冷却间隔约束。
+
+    Args:
+        gives_check_cache: 与本棵搜索树共用，加速 rollout 内 ``_move_gives_check``。
     """
     sim_board = board.copy()
     b_grid = sim_board.board
@@ -846,7 +871,7 @@ def _simulate_or_probe(
                 return (1.0 if cp == root_player else 0.0), red_moves, black_moves
 
         chosen, is_last_capture = _pick_rollout_move_fast(
-            sim_board, moves, b_grid,
+            sim_board, moves, b_grid, gives_check_cache=gives_check_cache,
         )
         if cp == "red":
             red_moves.add(chosen)
@@ -906,15 +931,22 @@ def _expand_one(
     node: MCTSMinimaxNode,
     move_stack: List[Tuple[Move4, Any]],
     tt: Dict[int, MCTSMinimaxNode],
+    probe_state: dict,
 ) -> Optional[Tuple[Move4, MCTSMinimaxNode]]:
     """从 untried_moves 弹出一个合法走法并建立父子边（含 DAG 合并）。"""
     mover = board.current_player
     while node.untried_moves:
         move = node.untried_moves.pop()
-        captured = board.apply_move(*move)
-        if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
-            board.undo_move(*move, captured)
+        applied = apply_pseudo_legal_with_rule_cache(
+            board,
+            move,
+            mover,
+            pre_move_cache=probe_state["pre_move_cache"],
+            post_apply_cache=probe_state["post_apply_cache"],
+        )
+        if applied is None:
             continue
+        captured, _ = applied
         move_stack.append((move, captured))
         child_hash = board.zobrist_hash
         existing = tt.get(child_hash)
@@ -994,6 +1026,8 @@ def _run_single_mcts_minimax_tree(
     # 初始化 per-tree probe 预算（调用次数 + 节点数双重上限）
     budget = ProbeBudget(max_simulations)
 
+    post_apply_cache = PostApplyFlagsCache(65536)
+    gives_check_cache = MoveGivesCheckCache(131072, post_apply_cache=post_apply_cache)
     # 初始化 per-tree probe 状态（所有模拟共享，多进程天然隔离）
     probe_state: dict = {
         "tt": {},
@@ -1002,12 +1036,14 @@ def _run_single_mcts_minimax_tree(
         "nodes": 0,
         "probes": 0,
         "budget": budget,
+        "post_apply_cache": post_apply_cache,
+        "pre_move_cache": gives_check_cache,
     }
 
     root_player = board.current_player
     opp_of_root = "black" if root_player == "red" else "red"
     root = MCTSMinimaxNode(state_hash=board.zobrist_hash, player_just_moved=opp_of_root)
-    root.ensure_moves(board)
+    root.ensure_moves(board, gives_check_cache)
 
     tt: Dict[int, MCTSMinimaxNode] = {root.state_hash: root}
     move_stack: List[Tuple[Move4, Any]] = []
@@ -1030,10 +1066,10 @@ def _run_single_mcts_minimax_tree(
             node = next_node
 
         # ── Expansion ──
-        node.ensure_moves(board)
+        node.ensure_moves(board, gives_check_cache)
         expanded = False
         if node.untried_moves:
-            result = _expand_one(board, node, move_stack, tt)
+            result = _expand_one(board, node, move_stack, tt, probe_state)
             if result is not None:
                 _exp_move, child = result
                 path.append(child)
@@ -1050,6 +1086,7 @@ def _run_single_mcts_minimax_tree(
                 board, root_player, probe_state,
                 sims_done=sims_done,
                 node_visits=node.visits,
+                gives_check_cache=gives_check_cache,
             )
 
         # ── Backpropagation ──

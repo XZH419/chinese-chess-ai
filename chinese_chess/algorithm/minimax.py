@@ -36,6 +36,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from chinese_chess.model.rules import Rules
 
 from .evaluation import Evaluation
+from .search_move_helpers import (
+    MoveGivesCheckCache,
+    PostApplyFlagsCache,
+    apply_pseudo_legal_with_rule_cache,
+)
 from .opening_book import OPENING_BOOK, mirror_move
 
 # ==================== 置换表边界类型常量 ====================
@@ -571,6 +576,11 @@ class MinimaxAI:
         # nodes=0 与着法异常等难以调试的 bug
         self.transposition_table.clear()
         self._reset_killers()
+        # 本步根搜索：走子前 (hash,move) + 走后 hash 双 LRU，压低 Rules 调用与重复 apply/undo
+        self._post_apply_flags_cache = PostApplyFlagsCache(65536)
+        self._pre_move_flags_cache = MoveGivesCheckCache(
+            131072, post_apply_cache=self._post_apply_flags_cache
+        )
 
         # 外部可传入从开局到当前局面的完整哈希链，
         # 若末尾已是当前局面则不再重复追加
@@ -619,15 +629,17 @@ class MinimaxAI:
 
                 for move in moves:
                     mover = board.current_player
-                    captured = board.apply_move(*move)
-                    self.history_hashes.append(board.zobrist_hash)
-
-                    # 延迟合法性校验：先走再检查是否送将或白脸将（将帅对面），
-                    # 不合法则撤回。比预检合法性更高效。
-                    if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
-                        self.history_hashes.pop()
-                        board.undo_move(*move, captured)
+                    applied = apply_pseudo_legal_with_rule_cache(
+                        board,
+                        move,
+                        mover,
+                        pre_move_cache=self._pre_move_flags_cache,
+                        post_apply_cache=self._post_apply_flags_cache,
+                    )
+                    if applied is None:
                         continue
+                    captured, _ = applied
+                    self.history_hashes.append(board.zobrist_hash)
 
                     has_legal_move = True
                     # 搜索下界快照：与容差/记录用的「业务 alpha」解耦，
@@ -831,12 +843,17 @@ class MinimaxAI:
 
         for move in captures:
             mover = board.current_player
-            captured = board.apply_move(*move)
-            self.history_hashes.append(board.zobrist_hash)
-            if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
-                self.history_hashes.pop()
-                board.undo_move(*move, captured)
+            applied = apply_pseudo_legal_with_rule_cache(
+                board,
+                move,
+                mover,
+                pre_move_cache=self._pre_move_flags_cache,
+                post_apply_cache=self._post_apply_flags_cache,
+            )
+            if applied is None:
                 continue
+            captured, _ = applied
+            self.history_hashes.append(board.zobrist_hash)
 
             try:
                 score = -self._quiescence_search(
@@ -981,21 +998,25 @@ class MinimaxAI:
                 raise SearchTimeoutException()
             is_cap = self._is_capture(board, move)
             mover = board.current_player
-            captured = board.apply_move(*move)
-            self.history_hashes.append(board.zobrist_hash)
-            if Rules.is_king_in_check(board, mover) or Rules._jiang_face_to_face(board):
-                self.history_hashes.pop()
-                board.undo_move(*move, captured)
+            applied = apply_pseudo_legal_with_rule_cache(
+                board,
+                move,
+                mover,
+                pre_move_cache=self._pre_move_flags_cache,
+                post_apply_cache=self._post_apply_flags_cache,
+            )
+            if applied is None:
                 continue
+            captured, opp_in_check = applied
+            self.history_hashes.append(board.zobrist_hash)
             has_legal_move = True
 
             # ---- 将军延伸 ----
             # 若走完这步后对手处于被将军状态，则不消耗深度余量，
             # 保证战术杀招序列不会因深度截断而被遗漏。
-            child_player = board.current_player
             next_depth = depth - 1
             next_check_ext = check_ext_left
-            if Rules.is_king_in_check(board, child_player) and check_ext_left > 0:
+            if opp_in_check and check_ext_left > 0:
                 next_depth = depth
                 next_check_ext = check_ext_left - 1
 
