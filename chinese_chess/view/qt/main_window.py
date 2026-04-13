@@ -769,30 +769,16 @@ class MainWindow(QMainWindow):
             return
         print(f"[UI] AI move signal received: {move}")
         if stats:
-            time_taken = stats.get("time_taken", "?")
-            self.append_log(
-                "搜索耗时 (秒): "
-                + (
-                    f"{time_taken:.3f}"
-                    if isinstance(time_taken, (int, float))
-                    else str(time_taken)
-                )
-            )
-            sims = stats.get("simulations")
-            if sims is not None:
-                workers = stats.get("workers", 1)
-                self.append_log(f"MCTS 模拟次数: {sims}  (workers: {workers})")
+            if stats.get("opening_book"):
+                self.append_log("命中开局库 | 耗时: 0.0s")
+            elif stats.get("simulations") is not None:
+                self._log_mcts_stats(stats)
             else:
-                depth = stats.get("depth", "?")
-                nodes = stats.get("nodes_evaluated", "?")
-                tt_hits = stats.get("tt_hits")
-                self.append_log("本次搜索深度: " + str(depth))
-                self.append_log("评估的节点总数: " + str(nodes))
-                if tt_hits is not None:
-                    self.append_log("置换表命中次数: " + str(tt_hits))
+                self._log_minimax_stats(stats)
         self.append_log("[UI] AI 信号接收完成，执行落子。")
         self.append_log("--------------------------")
         if move:
+
             outcome = self.controller.apply_move(
                 move, player=self.controller.board.current_player
             )
@@ -801,6 +787,39 @@ class MainWindow(QMainWindow):
         else:
             self._refresh_status()
             self.check_and_run_ai()
+
+    def _log_mcts_stats(self, stats: dict) -> None:
+        """格式化 MCTS 搜索统计并写入日志。"""
+        time_taken = stats.get("time_taken", 0)
+        sims = stats.get("simulations", 0)
+        workers = stats.get("workers", 1)
+        win_rate = stats.get("win_rate", "")
+        time_str = (
+            f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
+        )
+        parts = [
+            f"MCTS 思考完成 | 耗时: {time_str}s",
+            f"模拟: {sims} 次",
+            f"Workers: {workers}",
+        ]
+        if win_rate:
+            parts.append(f"胜率: {win_rate}")
+        self.append_log(" | ".join(parts))
+
+    def _log_minimax_stats(self, stats: dict) -> None:
+        """格式化 Minimax 搜索统计并写入日志。"""
+        time_taken = stats.get("time_taken", "?")
+        time_str = (
+            f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
+        )
+        self.append_log(f"搜索耗时 (秒): {time_str}")
+        depth = stats.get("depth", "?")
+        nodes = stats.get("nodes_evaluated", "?")
+        self.append_log(f"本次搜索深度: {depth}")
+        self.append_log(f"评估的节点总数: {nodes}")
+        tt_hits = stats.get("tt_hits")
+        if tt_hits is not None:
+            self.append_log(f"置换表命中次数: {tt_hits}")
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from chinese_chess.model.board import Board
 from chinese_chess.model.rules import Rules
 
 from .evaluation import Evaluation
+from .opening_book import OPENING_BOOK, mirror_move
 
 _CAPTURE_PROB = 0.80
 _UCB_C = 1.414
@@ -454,7 +455,30 @@ class MCTSAI:
         time_limit: Optional[float] = None,
         max_simulations: Optional[int] = None,
     ) -> Optional[Move4]:
-        """执行 MCTS-RAVE 搜索并返回最佳走法。"""
+        """执行 MCTS-RAVE 搜索并返回最佳走法。
+
+        搜索前先查询开局库；命中时瞬间返回，``last_stats`` 中标注
+        ``opening_book=True`` 与 ``win_rate="Book Move"``。
+        """
+        move_history: List[int] = [] if game_history is None else list(game_history)
+
+        # ── 开局库拦截 ──
+        if len(move_history) < 30:
+            book_move = self._probe_opening_book(board, move_history)
+            if book_move is not None:
+                self.simulations_run = 0
+                self.last_stats = {
+                    "time_taken": 0.0,
+                    "simulations": 0,
+                    "workers": self.workers,
+                    "win_rate": "Book Move",
+                    "opening_book": True,
+                }
+                if self.verbose:
+                    print(f"命中开局库！瞬间出棋: {book_move}")
+                return book_move
+
+        # ── MCTS-RAVE 正式搜索 ──
         tl = time_limit if time_limit is not None else self.time_limit
         ms = max_simulations if max_simulations is not None else self.max_simulations
         t0 = time.time()
@@ -487,6 +511,7 @@ class MCTSAI:
             "time_taken": elapsed,
             "simulations": total_sims,
             "workers": effective_workers,
+            "win_rate": f"{best_wr * 100:.1f}%",
         }
         if self.verbose:
             print(f"MCTS 搜索完成，总模拟次数: {total_sims}  ({effective_workers} workers)")
@@ -494,6 +519,34 @@ class MCTSAI:
             if best_move is not None:
                 print(f"最佳走法: {best_move}  胜率: {best_wr:.1%}  访问: {best_visits}")
         return best_move
+
+    @staticmethod
+    def _probe_opening_book(
+        board: Board, move_history: List[int],
+    ) -> Optional[Move4]:
+        """查询开局库，含镜像回退；未命中返回 None。"""
+        zkey = board.zobrist_hash
+        book_moves = OPENING_BOOK.get(zkey)
+        if book_moves is None:
+            zm = board.column_mirror_copy().zobrist_hash
+            alt = OPENING_BOOK.get(zm)
+            if alt is not None:
+                book_moves = [mirror_move(m) for m in alt]
+        if book_moves is None and len(move_history) == 0:
+            keys = list(OPENING_BOOK.keys())
+            disp = keys if len(keys) <= 48 else keys[:24] + ["..."] + keys[-16:]
+            print(
+                f"[MCTS opening book] 根局面未命中（zkey={zkey:#x}）；"
+                f"OPENING_BOOK 共 {len(keys)} 个键: {disp}"
+            )
+        if book_moves:
+            valid = [
+                m for m in book_moves
+                if Rules.is_valid_move(board, m[0], m[1], m[2], m[3])[0]
+            ]
+            if valid:
+                return random.choice(valid)
+        return None
 
     def _parallel_search(
         self,
