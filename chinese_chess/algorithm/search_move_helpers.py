@@ -1,25 +1,201 @@
-"""搜索器共享：伪合法走子后的局面判定（不自成规则引擎）。
+"""搜索器共享：伪合法走子判定 + 「是否将军」虚拟几何快速路径。
 
-仅封装 ``Board`` + ``Rules`` 的常见调用组合，供 Minimax / MCTS / MCTS-Minimax
-在热点路径复用。内部不实现车炮马兵几何；一律委托 ``Rules``。
-
-缓存策略：
-- **走子前键** ``(zobrist_hash, move)``：命中时可跳过整段 ``apply → Rules → undo``
-  （用于 ``move_gives_check_with_undo`` 与 Minimax 主循环等）。
-- **走子后键** ``zobrist_hash``：命中时可跳过 ``pseudo_move_post_apply_flags`` 内
-  对 ``Rules`` 的重复调用（置换/重复展开同一走后局面时）。
+语义对齐 ``Rules``（不修改 ``rules.py``）。车/炮/马/兵照将与揭线用虚拟 ``cell``；
+无法安全推断时 fallback ``apply → Rules → undo``。LRU 见类 ``MoveGivesCheckCache`` 等。
 """
 
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 from chinese_chess.model.board import Board
 from chinese_chess.model.rules import Rules
 
 # 与三处搜索器一致的走法四元组
 Move4 = Tuple[int, int, int, int]
+
+_VCell = Callable[[int, int], Any]
+
+
+def _virtual_cell_factory(
+    board: Board, sr: int, sc: int, er: int, ec: int, moving
+) -> _VCell:
+    b = board.board
+
+    def cell(r: int, c: int):
+        if r == sr and c == sc:
+            return None
+        if r == er and c == ec:
+            return moving
+        return b[r][c]
+
+    return cell
+
+
+def _virtual_king_positions(
+    board: Board,
+    piece,
+    er: int,
+    ec: int,
+    captured,
+) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
+    rk = board.red_king_pos
+    bk = board.black_king_pos
+    if piece.piece_type == "jiang":
+        if piece.color == "red":
+            rk = (er, ec)
+        else:
+            bk = (er, ec)
+    if captured is not None and captured.piece_type == "jiang":
+        if captured.color == "red":
+            rk = None
+        else:
+            bk = None
+    return rk, bk
+
+
+def _virtual_jiang_face(
+    rk: Optional[Tuple[int, int]],
+    bk: Optional[Tuple[int, int]],
+    cell: _VCell,
+) -> bool:
+    if rk is None or bk is None:
+        return False
+    if rk[1] != bk[1]:
+        return False
+    col = rk[1]
+    lo, hi = min(rk[0], bk[0]), max(rk[0], bk[0])
+    for r in range(lo + 1, hi):
+        if cell(r, col) is not None:
+            return False
+    return True
+
+
+def _virtual_is_king_in_check_at(
+    kr: int,
+    kc: int,
+    defender: str,
+    cell: _VCell,
+) -> bool:
+    """镜像 ``Rules.is_king_in_check`` 的车/炮/马/兵反向检测，读虚拟 ``cell``。"""
+    opponent = "black" if defender == "red" else "red"
+
+    for dr, dc in Rules._ORTH_DELTAS:
+        obstacles = 0
+        r, c = kr + dr, kc + dc
+        while 0 <= r < 10 and 0 <= c < 9:
+            p = cell(r, c)
+            if p is not None:
+                if obstacles == 0:
+                    if p.color == opponent and p.piece_type == "che":
+                        return True
+                    obstacles = 1
+                else:
+                    if p.color == opponent and p.piece_type == "pao":
+                        return True
+                    break
+            r += dr
+            c += dc
+
+    for ddr, ddc in Rules._MA_ATTACK_DELTAS:
+        hr, hc = kr + ddr, kc + ddc
+        if not (0 <= hr < 10 and 0 <= hc < 9):
+            continue
+        hp = cell(hr, hc)
+        if hp is None or hp.color != opponent or hp.piece_type != "ma":
+            continue
+        leg_r, leg_c = Rules._ma_leg_square(hr, hc, kr, kc)
+        if not (0 <= leg_r < 10 and 0 <= leg_c < 9):
+            continue
+        if cell(leg_r, leg_c) is not None:
+            continue
+        return True
+
+    if defender == "red":
+        for pr, pc in ((kr - 1, kc), (kr, kc - 1), (kr, kc + 1)):
+            if 0 <= pr < 10 and 0 <= pc < 9:
+                pp = cell(pr, pc)
+                if (
+                    pp is not None
+                    and pp.color == opponent
+                    and pp.piece_type == "bing"
+                ):
+                    return True
+    else:
+        for pr, pc in ((kr + 1, kc), (kr, kc - 1), (kr, kc + 1)):
+            if 0 <= pr < 10 and 0 <= pc < 9:
+                pp = cell(pr, pc)
+                if (
+                    pp is not None
+                    and pp.color == opponent
+                    and pp.piece_type == "bing"
+                ):
+                    return True
+
+    return False
+
+
+def try_fast_move_legality_and_opponent_check(
+    board: Board,
+    move: Move4,
+    mover: str,
+) -> Optional[Tuple[bool, bool]]:
+    """虚拟走子后 ``(legal, opp_in_check)``；无法安全推断时 ``None`` → fallback。"""
+    sr, sc, er, ec = move
+    b = board.board
+    if not (0 <= sr < 10 and 0 <= sc < 9 and 0 <= er < 10 and 0 <= ec < 9):
+        return None
+    piece = b[sr][sc]
+    if piece is None or piece.color != mover:
+        return None
+    captured = b[er][ec]
+    if captured is not None and captured.color == mover:
+        return None
+
+    cell = _virtual_cell_factory(board, sr, sc, er, ec, piece)
+    rk, bk = _virtual_king_positions(board, piece, er, ec, captured)
+
+    if _virtual_jiang_face(rk, bk, cell):
+        return False, False
+
+    mk = rk if mover == "red" else bk
+    if mk is None:
+        return False, False
+    if _virtual_is_king_in_check_at(mk[0], mk[1], mover, cell):
+        return False, False
+
+    opp = "black" if mover == "red" else "red"
+    ok = bk if mover == "red" else rk
+    if ok is None:
+        return True, False
+    gives = _virtual_is_king_in_check_at(ok[0], ok[1], opp, cell)
+    return True, gives
+
+
+def _slow_move_gives_check_apply(board: Board, move: Move4, mover: str) -> bool:
+    captured = board.apply_move(*move)
+    try:
+        legal, opp_in_check = pseudo_move_post_apply_flags(board, mover)
+        return opp_in_check if legal else False
+    finally:
+        board.undo_move(*move, captured)
+
+
+def fast_move_gives_check(
+    board: Board,
+    move: Move4,
+    mover: str,
+    gives_check_cache: Optional["MoveGivesCheckCache"] = None,
+) -> bool:
+    """走法是否给对方将军（非法则 ``False``）。优先虚拟几何 + LRU，必要时 fallback。"""
+    if gives_check_cache is not None:
+        return gives_check_cache.probe_move_gives_check(board, move, mover)
+    res = try_fast_move_legality_and_opponent_check(board, move, mover)
+    if res is not None:
+        legal, gc = res
+        return gc if legal else False
+    return _slow_move_gives_check_apply(board, move, mover)
 
 
 def pseudo_move_illegal_after_apply(board: Board, mover: str) -> bool:
@@ -141,6 +317,13 @@ class MoveGivesCheckCache:
             self._data.move_to_end(key)
             legal, gc = hit
             return gc if legal else False
+        res = try_fast_move_legality_and_opponent_check(board, move, mover)
+        if res is not None:
+            legal, gc = res
+            self._data[key] = (legal, gc)
+            self._data.move_to_end(key)
+            self._trim()
+            return gc if legal else False
         captured = board.apply_move(*move)
         try:
             legal, gc = pseudo_move_post_apply_flags_cached(board, mover, self._post_apply)
@@ -158,15 +341,8 @@ def move_gives_check_with_undo(
     mover: str,
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
 ) -> bool:
-    """``apply`` → 判定是否给对方将军 → ``undo``；非法着法则返回 ``False``。"""
-    if gives_check_cache is not None:
-        return gives_check_cache.probe_move_gives_check(board, move, mover)
-    captured = board.apply_move(*move)
-    try:
-        legal, opp_in_check = pseudo_move_post_apply_flags(board, mover)
-        return opp_in_check if legal else False
-    finally:
-        board.undo_move(*move, captured)
+    """判定是否给对方将军（非法则 ``False``）；等同 ``fast_move_gives_check``。"""
+    return fast_move_gives_check(board, move, mover, gives_check_cache)
 
 
 def apply_pseudo_legal_with_rule_cache(

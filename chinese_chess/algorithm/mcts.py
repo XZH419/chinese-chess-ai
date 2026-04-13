@@ -50,7 +50,7 @@ from .search_move_helpers import (
     MoveGivesCheckCache,
     PostApplyFlagsCache,
     apply_pseudo_legal_with_rule_cache,
-    move_gives_check_with_undo,
+    fast_move_gives_check,
 )
 from .opening_book import OPENING_BOOK, mirror_move
 
@@ -80,8 +80,8 @@ def _move_gives_check(
     mover: str,
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
 ) -> bool:
-    """走法是否对对方将军（apply/undo，非法则 False）；可选 LRU 缓存。"""
-    return move_gives_check_with_undo(board, move, mover, gives_check_cache)
+    """走法是否对对方将军（非法则 False）。虚拟几何 + LRU + fallback。"""
+    return fast_move_gives_check(board, move, mover, gives_check_cache)
 
 
 def _is_aggressive_push(board: Board, mover: str, m: Move4, b_grid) -> bool:
