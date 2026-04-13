@@ -2,7 +2,8 @@
 
 集成技术：UCB1-RAVE 混合选择、惰性走法展开、apply/undo 状态回溯（零拷贝树遍历）、
 动态截断启发模拟（Lightweight Rollout + Evaluation 兜底）、__slots__ 节点内存优化、
-多进程根节点并行（Root Parallelism）、RAVE/AMAF 快速着法价值估计。
+多进程根节点并行（Root Parallelism）、RAVE/AMAF 快速着法价值估计、
+Zobrist 置换表 DAG 合并（同局面共享统计）。
 """
 
 from __future__ import annotations
@@ -143,7 +144,12 @@ def _run_single_mcts_tree(
     time_limit: float,
     seed_offset: int = 0,
 ) -> Dict[Move4, Dict[str, float]]:
-    """在独立进程/线程中执行一棵完整的 MCTS-RAVE 搜索树。
+    """在独立进程/线程中执行一棵完整的 MCTS-RAVE-DAG 搜索树。
+
+    局部置换表 ``tt`` 将相同 Zobrist 哈希的节点合并为同一实例（DAG），
+    使不同着法序列到达的同一局面共享 visits / wins 统计，加速收敛。
+    因为 ``_backpropagate`` 已改为接收显式 ``path`` 列表，
+    DAG 中"一个节点有多个父节点无法回溯"的经典难题不复存在。
 
     Returns:
         ``{move: {"visits": V, "wins": W, "rave_visits": RV, "rave_wins": RW}}``
@@ -156,6 +162,7 @@ def _run_single_mcts_tree(
     root = MCTSNode(state_hash=board.zobrist_hash, player_just_moved=opp_of_root)
     root.ensure_moves(board)
 
+    tt: Dict[int, MCTSNode] = {root.state_hash: root}
     move_stack: List[Tuple[Move4, Any]] = []
     sims_done = 0
 
@@ -178,7 +185,7 @@ def _run_single_mcts_tree(
         node.ensure_moves(board)
         expanded = False
         if node.untried_moves:
-            child = _expand_one(board, node, move_stack)
+            child = _expand_one(board, node, move_stack, tt)
             if child is not None:
                 node = child
                 path.append(node)
@@ -217,8 +224,13 @@ def _expand_one(
     board: Board,
     node: MCTSNode,
     move_stack: List[Tuple[Move4, Any]],
+    tt: Dict[int, MCTSNode],
 ) -> Optional[MCTSNode]:
-    """从 ``node.untried_moves`` 弹出一个合法走法并创建子节点。"""
+    """从 ``node.untried_moves`` 弹出一个合法走法并创建或复用子节点。
+
+    置换表命中时直接复用已有节点（DAG 合并），使不同路径到达的同一局面
+    共享 visits / wins / rave 统计。
+    """
     mover = board.current_player
     while node.untried_moves:
         move = node.untried_moves.pop()
@@ -227,12 +239,18 @@ def _expand_one(
             board.undo_move(*move, captured)
             continue
         move_stack.append((move, captured))
+        child_hash = board.zobrist_hash
+        existing = tt.get(child_hash)
+        if existing is not None:
+            node.children.append(existing)
+            return existing
         child = MCTSNode(
-            state_hash=board.zobrist_hash,
+            state_hash=child_hash,
             player_just_moved=mover,
             parent=node,
             move=move,
         )
+        tt[child_hash] = child
         node.children.append(child)
         return child
     return None
