@@ -1073,28 +1073,51 @@ class MainWindow(QMainWindow):
     # ────────────────────── 独立 AI 子进程 ──────────────────────
 
     def _ensure_ai_worker(self) -> None:
-        """懒启动长驻 AI 子进程（spawn）；若已崩溃则重启。"""
+        """懒启动唯一 AI 子进程（spawn）；崩溃后重启前会先 join 收尸，避免残留 python.exe。
+
+        不显式传 ``daemon``：默认 ``daemon=False``，否则 MCTS 无法在进程内再开
+        ``ProcessPoolExecutor``（会报 *daemonic processes are not allowed to have children*）。
+        """
         ctx = multiprocessing.get_context("spawn")
+        if self._ai_worker_process is not None and not self._ai_worker_process.is_alive():
+            try:
+                self._ai_worker_process.join(timeout=1.0)
+            except Exception:
+                pass
+            self._ai_worker_process = None
+            self._ai_request_queue = None
+            self._ai_response_queue = None
+
         need = self._ai_worker_process is None or not self._ai_worker_process.is_alive()
         if need:
             if self._ai_worker_process is not None:
                 print("[GUI] 检测到 AI 子进程异常退出，正在重启…")
             self._ai_request_queue = ctx.Queue()
             self._ai_response_queue = ctx.Queue()
-            # 必须为 False：MCTS / MCTS-Minimax 在子进程内会再 spawn worker；
-            # daemon=True 时 Python 禁止子进程再创建子进程（daemonic processes are not allowed to have children）。
+            # 不传 daemon：默认非 daemon，AI 子进程才能再 spawn MCTS worker 子进程。
             self._ai_worker_process = ctx.Process(
                 target=ai_worker_main,
                 args=(self._ai_request_queue, self._ai_response_queue),
-                daemon=False,
                 name="ChineseChessAIWorker",
             )
             self._ai_worker_process.start()
-            print("[GUI] 已启动 AI 子进程搜索")
+            print("[GUI] 已启动 AI 子进程搜索（非 daemon，关闭窗口或结束对局时会显式关闭）")
 
     def _shutdown_ai_worker_process(self) -> None:
-        """关闭 AI 子进程（窗口退出时调用）。"""
-        if self._ai_worker_process is None or not self._ai_worker_process.is_alive():
+        """显式结束 AI 子进程（非 daemon 不会随主进程自动退出）。
+
+        流程：``request_queue.put(None)`` 哨兵 → ``join`` → 仍存活则 ``terminate``。
+        调用点：``closeEvent``、``_stop_game``（重开/结束对局时避免多个 worker 并存）。
+        """
+        if self._ai_worker_process is None:
+            self._ai_request_queue = None
+            self._ai_response_queue = None
+            return
+        if not self._ai_worker_process.is_alive():
+            try:
+                self._ai_worker_process.join(timeout=0.5)
+            except Exception:
+                pass
             self._ai_worker_process = None
             self._ai_request_queue = None
             self._ai_response_queue = None
@@ -1110,7 +1133,7 @@ class MainWindow(QMainWindow):
         self._ai_response_queue = None
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """窗口关闭时结束 AI 子进程。"""
+        """窗口关闭时结束 AI 子进程，避免残留 python.exe。"""
         self._shutdown_ai_worker_process()
         super().closeEvent(event)
 
