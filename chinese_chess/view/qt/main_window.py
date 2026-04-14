@@ -1081,10 +1081,12 @@ class MainWindow(QMainWindow):
                 print("[GUI] 检测到 AI 子进程异常退出，正在重启…")
             self._ai_request_queue = ctx.Queue()
             self._ai_response_queue = ctx.Queue()
+            # 必须为 False：MCTS / MCTS-Minimax 在子进程内会再 spawn worker；
+            # daemon=True 时 Python 禁止子进程再创建子进程（daemonic processes are not allowed to have children）。
             self._ai_worker_process = ctx.Process(
                 target=ai_worker_main,
                 args=(self._ai_request_queue, self._ai_response_queue),
-                daemon=True,
+                daemon=False,
                 name="ChineseChessAIWorker",
             )
             self._ai_worker_process.start()
