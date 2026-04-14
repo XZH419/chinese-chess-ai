@@ -1,0 +1,23 @@
+== E1: RandomAI vs RandomAI | start=midgame ==
+games: 10 | red_wins: 1 | black_wins: 1 | draws: 8 | errors: 0
+avg plies: 134.1
+mean red avg time (s): 0.0004 | mean black avg time (s): 0.0006
+ai win share: RandomAI: 2 wins (20.0%)
+
+== E2: MinimaxAI(depth=4) vs RandomAI | calib_median=0.769s | start=midgame ==
+games: 10 | red_wins: 5 | black_wins: 5 | draws: 0 | errors: 0
+avg plies: 23.9
+mean red avg time (s): 0.2936 | mean black avg time (s): 0.3747
+ai win share: MinimaxAI: 10 wins (100.0%)
+
+== E3: MCTSAI vs RandomAI | tl=0.769s | start=midgame ==
+games: 10 | red_wins: 0 | black_wins: 6 | draws: 4 | errors: 0
+avg plies: 97.6
+mean red avg time (s): 0.4026 | mean black avg time (s): 0.9740
+ai win share: MCTSAI: 2 wins (20.0%), RandomAI: 4 wins (40.0%)
+
+== E4: MinimaxAI(depth=4) vs MCTSAI | tl=0.769s | start=midgame ==
+games: 10 | red_wins: 5 | black_wins: 5 | draws: 0 | errors: 0
+avg plies: 29.7
+mean red avg time (s): 0.4486 | mean black avg time (s): 0.7247
+ai win share: MinimaxAI: 10 wins (100.0%)
