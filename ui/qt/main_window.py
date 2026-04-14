@@ -88,9 +88,10 @@ def _assets_dir() -> str:
     Returns:
         str: ``ui/resources/img`` 目录的规范化绝对路径。
     """
-    return os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "resources", "img")
-    )
+    # 重要：必须返回绝对路径。GUI 可能在不同工作目录下启动，
+    # 若返回相对路径，QPixmap 将无法稳定加载资源。
+    ui_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    return os.path.normpath(os.path.join(ui_dir, "resources", "img"))
 
 
 def _img(name: str) -> str:
