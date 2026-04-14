@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ai.mcts_ai import MCTSAI
-from ai.mcts_minimax_ai import MCTSMinimaxAI
 from ai.minimax_ai import MinimaxAI
 from ai.random_ai import RandomAI
 from engine.board import Board
@@ -374,7 +373,7 @@ def main() -> None:
 
     # 实验 B：MinimaxAI(D=5) vs MCTSMinimaxAI(sims=8000, workers=8)，共 10 局（可自行改为 20）
     b1 = MinimaxAI(depth=5)
-    b2 = MCTSMinimaxAI(max_simulations=8000, time_limit=999.0, workers=_safe_workers(8), verbose=False)
+    b2 = MCTSAI(max_simulations=8000, time_limit=999.0, workers=_safe_workers(8), verbose=False)
     results += run_match(
         b1,
         b2,
@@ -384,7 +383,7 @@ def main() -> None:
 
     # 实验 C：MCTSAI(sims=8000, workers=8) vs MCTSMinimaxAI(sims=8000, workers=8)，共 10 局（可自行改为 20）
     c1 = MCTSAI(max_simulations=8000, time_limit=999.0, workers=_safe_workers(8), verbose=False)
-    c2 = MCTSMinimaxAI(max_simulations=8000, time_limit=999.0, workers=_safe_workers(8), verbose=False)
+    c2 = MCTSAI(max_simulations=8000, time_limit=999.0, workers=_safe_workers(8), verbose=False)
     results += run_match(
         c1,
         c2,

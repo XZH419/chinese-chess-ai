@@ -26,7 +26,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ai.mcts_ai import MCTSAI
-from ai.mcts_minimax_ai import MCTSMinimaxAI
 from ai.minimax_ai import MinimaxAI
 from engine.board import Board
 from engine.rules import MoveEntry, Rules
@@ -272,8 +271,9 @@ def main() -> None:
     def _mk_mcts(workers: int) -> MCTSAI:
         return MCTSAI(max_simulations=sims, time_limit=999.0, workers=workers, verbose=False)
 
-    def _mk_hybrid(workers: int) -> MCTSMinimaxAI:
-        return MCTSMinimaxAI(max_simulations=sims, time_limit=999.0, workers=workers, verbose=False)
+    def _mk_hybrid(workers: int) -> MCTSAI:
+        # 兼容：历史上此处对比的是另一个变体；现统一为纯 MCTS。
+        return MCTSAI(max_simulations=sims, time_limit=999.0, workers=workers, verbose=False)
 
     for workers in (1, wmax):
         t_med, sps = _measure_mcts_like(

@@ -270,22 +270,22 @@ def cmd_profile_mcts(args: argparse.Namespace) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  子命令三：mcts_minimax（MCTS-Minimax 搜索性能分析）
+#  子命令三：mcts_minimax（兼容别名；当前实现为纯 MCTS）
 # ═══════════════════════════════════════════════════════════════
 
 
 def cmd_profile_mcts_minimax(args: argparse.Namespace) -> None:
-    """MCTS-Minimax 单树性能分析：调用 ``_run_single_mcts_minimax_tree``。"""
+    """兼容入口：历史上用于另一变体；现在统一调用纯 MCTS 单树。"""
     from engine.board import Board
-    from ai.mcts_minimax_ai import _run_single_mcts_minimax_tree
+    from ai.mcts_ai import _run_single_mcts_tree
 
     sims = args.simulations
     top_n = args.top
 
     board = Board()
-    print(f"[MCTS-Minimax 性能分析] 初始局面子力数: {board.piece_count()}")
+    print(f"[MCTS 性能分析(兼容键 mcts_minimax)] 初始局面子力数: {board.piece_count()}")
     print(
-        f"[MCTS-Minimax 性能分析] cProfile: max_simulations={sims}, "
+        f"[MCTS 性能分析(兼容键 mcts_minimax)] cProfile: max_simulations={sims}, "
         f"time_limit=999（无时间限制）"
     )
     print()
@@ -293,7 +293,7 @@ def cmd_profile_mcts_minimax(args: argparse.Namespace) -> None:
     profiler = cProfile.Profile()
     profiler.enable()
 
-    child_stats, probe_stats = _run_single_mcts_minimax_tree(
+    child_stats = _run_single_mcts_tree(
         board=board,
         max_simulations=sims,
         time_limit=999.0,
@@ -306,11 +306,6 @@ def cmd_profile_mcts_minimax(args: argparse.Namespace) -> None:
     print(
         f"搜索完成: {len(child_stats)} 个根着法分支，合计访问次数={total_visits}"
     )
-    print(
-        f"局面探查次数: {probe_stats.get('probes', 0)}，"
-        f"子搜索预算（调用次数）: {probe_stats.get('budget_calls_used', 0)}/"
-        f"{probe_stats.get('budget_calls_max', 0)}"
-    )
     print()
 
     stream = io.StringIO()
@@ -320,7 +315,7 @@ def cmd_profile_mcts_minimax(args: argparse.Namespace) -> None:
     print(stream.getvalue())
 
     print("=" * 72)
-    print("MCTS-Minimax 性能分析完成。")
+    print("MCTS 性能分析完成。")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -356,7 +351,7 @@ def main() -> None:
 
     p_mcts_minimax = subparsers.add_parser(
         "mcts_minimax",
-        help="MCTS-Minimax 单核性能分析（默认 1500 次模拟）",
+        help="兼容别名：MCTS 单核性能分析（默认 1500 次模拟）",
     )
     p_mcts_minimax.add_argument("--simulations", type=int, default=1500, help="模拟次数（默认 1500）")
     p_mcts_minimax.add_argument("--top", type=int, default=30, help="打印热点条数（默认 30）")

@@ -15,7 +15,6 @@ from typing import Any, Callable, Dict, Optional, Type
 
 from ai.minimax_ai import MinimaxAI
 from ai.mcts_ai import MCTSAI
-from ai.mcts_minimax_ai import MCTSMinimaxAI
 from ai.random_ai import RandomAI
 
 
@@ -47,12 +46,12 @@ def _cfg_mcts(cfg: Dict[str, Any]) -> MCTSAI:
     )
 
 
-def _cfg_mcts_minimax(cfg: Dict[str, Any]) -> MCTSMinimaxAI:
-    return MCTSMinimaxAI(
-        max_simulations=int(cfg.get("max_simulations", 4000)),
+def _cfg_mcts_minimax(cfg: Dict[str, Any]) -> MCTSAI:
+    """兼容旧键：mcts_minimax 已合并为纯 MCTS，统一走 MCTSAI。"""
+    return MCTSAI(
+        max_simulations=int(cfg.get("max_simulations", 5000)),
         time_limit=float(cfg.get("time_limit", 10.0)),
         workers=cfg.get("workers"),
-        probe_depth=int(cfg.get("probe_depth", 2)),
         verbose=bool(cfg.get("verbose", False)),
     )
 
@@ -76,14 +75,14 @@ def _to_cfg_mcts(agent: MCTSAI) -> Dict[str, Any]:
     }
 
 
-def _to_cfg_mcts_minimax(agent: MCTSMinimaxAI) -> Dict[str, Any]:
+def _to_cfg_mcts_minimax(agent: MCTSAI) -> Dict[str, Any]:
+    """兼容旧键：保持 ai_type=mcts_minimax 以兼容 GUI/脚本配置。"""
     w = getattr(agent, "workers", None)
     return {
         "ai_type": "mcts_minimax",
-        "max_simulations": int(getattr(agent, "max_simulations", 4000)),
+        "max_simulations": int(getattr(agent, "max_simulations", 5000)),
         "time_limit": float(getattr(agent, "time_limit", 10.0)),
         "workers": (int(w) if w is not None else None),
-        "probe_depth": int(getattr(agent, "probe_depth", 2)),
         "verbose": bool(getattr(agent, "verbose", False)),
     }
 
@@ -112,8 +111,8 @@ AI_REGISTRY: Dict[str, AIRegistryEntry] = {
     ),
     "mcts_minimax": AIRegistryEntry(
         ai_type="mcts_minimax",
-        display_name="MCTS-Minimax AI",
-        cls=MCTSMinimaxAI,
+        display_name="MCTS AI",
+        cls=MCTSAI,
         from_config=_cfg_mcts_minimax,
         to_config=_to_cfg_mcts_minimax,
     ),

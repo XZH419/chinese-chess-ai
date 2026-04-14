@@ -8,7 +8,6 @@ from typing import Any, Optional, Tuple
 
 from ai.minimax_ai import MinimaxAI
 from ai.mcts_ai import MCTSAI
-from ai.mcts_minimax_ai import MCTSMinimaxAI
 from ai.random_ai import RandomAI
 from engine.board import Board
 from engine.rules import MoveEntry, Rules
@@ -120,7 +119,8 @@ def build_agent(engine: str, *, depth: int, sims: int, stochastic: bool) -> Any:
     if e == "mcts":
         return MCTSAI(time_limit=999.0, max_simulations=sims, verbose=False)
     if e == "mcts_minimax":
-        return MCTSMinimaxAI(max_simulations=sims, time_limit=999.0, verbose=False)
+        # 兼容旧键：已合并为纯 MCTS
+        return MCTSAI(time_limit=999.0, max_simulations=sims, verbose=False)
     if e == "random":
         return RandomAI()
     raise ValueError(f"不支持的引擎: {engine!r}")

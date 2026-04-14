@@ -1,0 +1,17 @@
+== A: MinimaxAI(depth=5) vs RandomAI ==
+games: 4 | red_wins: 1 | black_wins: 0 | draws: 0 | errors: 3
+avg plies: 9.2
+mean red avg time (s): 5.6478 | mean black avg time (s): 19.8953
+ai win share: MinimaxAI: 1 wins (25.0%)
+
+== B: MinimaxAI(depth=5) vs MCTSMinimaxAI(sims=8000, workers=8) ==
+games: 10 | red_wins: 4 | black_wins: 4 | draws: 0 | errors: 2
+avg plies: 26.0
+mean red avg time (s): 9.8001 | mean black avg time (s): 7.6210
+ai win share: MinimaxAI: 8 wins (80.0%)
+
+== C: MCTSAI(sims=8000, workers=8) vs MCTSMinimaxAI(sims=8000, workers=8) ==
+games: 10 | red_wins: 2 | black_wins: 0 | draws: 1 | errors: 7
+avg plies: 41.8
+mean red avg time (s): 1.7952 | mean black avg time (s): 7.8361
+ai win share: MCTSAI: 2 wins (20.0%)

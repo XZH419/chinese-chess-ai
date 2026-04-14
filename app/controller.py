@@ -47,14 +47,7 @@ def describe_player_agent(agent: Optional[Any]) -> str:
             if sims is not None
             else "MCTS AI"
         )
-    if cls == "MCTSMinimaxAI":
-        sims = getattr(agent, "max_simulations", None)
-        w = getattr(agent, "workers", 1)
-        return (
-            f"MCTS-Minimax AI，模拟上限 {sims}，并行进程数 {w}"
-            if sims is not None
-            else "MCTS-Minimax AI"
-        )
+    # MCTSMinimaxAI 已合并为纯 MCTS（保留旧类名分支不会命中，但也不影响）
     return cls
 
 

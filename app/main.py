@@ -108,12 +108,11 @@ if __name__ == "__main__":
     from ai.random_ai import RandomAI
     from ai.minimax_ai import MinimaxAI
     from ai.mcts_ai import MCTSAI
-    from ai.mcts_minimax_ai import MCTSMinimaxAI
 
     def _default_sims(kind: str, sims: Optional[int]) -> int:
         if sims is not None:
             return sims
-        return 4000 if kind == "mcts_minimax" else 5000
+        return 5000
 
     def build_agent(kind: str, *, depth: int, sims: Optional[int]):
         """根据玩家类型字符串构建对应的 AI 代理实例。
@@ -139,9 +138,10 @@ if __name__ == "__main__":
                 verbose=False,
             )
         if kind == "mcts_minimax":
-            return MCTSMinimaxAI(
-                max_simulations=_default_sims(kind, sims),
+            # 兼容旧键：已合并为纯 MCTS
+            return MCTSAI(
                 time_limit=10.0,
+                max_simulations=_default_sims(kind, sims),
                 verbose=False,
             )
         raise ValueError(f"未知的玩家类型: {kind!r}")
