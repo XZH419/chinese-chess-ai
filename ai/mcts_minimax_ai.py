@@ -20,6 +20,7 @@ from __future__ import annotations
 import concurrent.futures
 import math
 import multiprocessing
+import os
 import random
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -452,6 +453,11 @@ def _run_single_mcts_minimax_tree(
     Returns:
         根子节点统计 ``child_stats``。
     """
+    # 临时观测日志：用于确认 Windows 下并行 worker 确实启动。
+    print(
+        f"[PID {os.getpid()}] Parallel worker started for MCTS-Minimax "
+        f"(sims={max_simulations}, time_limit={time_limit})"
+    )
     random.seed(time.time_ns() + seed_offset)
     t0 = time.time()
 
@@ -459,18 +465,23 @@ def _run_single_mcts_minimax_tree(
     gives_check_cache = MoveGivesCheckCache(131072, post_apply_cache=post_apply_cache)
     mcts_gives: Dict[Tuple[int, Move4], Tuple[bool, bool]] = {}
 
-    root_player = board.current_player
+    # 同 `ai.mcts_ai`：为避免 apply/undo 栈在极端伪合法路径下破坏可逆性，
+    # 每次迭代使用独立棋盘副本。
+    root_board = board
+
+    root_player = root_board.current_player
     opp_of_root = "black" if root_player == "red" else "red"
-    root = MCTSMinimaxNode(state_hash=board.zobrist_hash, player_just_moved=opp_of_root)
-    root.ensure_moves(board, gives_check_cache, mcts_gives=mcts_gives)
+    root = MCTSMinimaxNode(state_hash=root_board.zobrist_hash, player_just_moved=opp_of_root)
+    root.ensure_moves(root_board, gives_check_cache, mcts_gives=mcts_gives)
 
     tt: Dict[int, MCTSMinimaxNode] = {root.state_hash: root}
-    move_stack: List[Tuple[Move4, Any]] = []
     sims_done = 0
 
     while sims_done < max_simulations:
         if time.time() - t0 >= time_limit:
             break
+        board = root_board.copy()
+        move_stack: List[Tuple[Move4, Any]] = []
 
         if root_move_history is not None and (
             len(root_move_history) > 0
@@ -535,12 +546,7 @@ def _run_single_mcts_minimax_tree(
         # ── Backpropagation ──
         _backpropagate(path, sim_result, red_moves, black_moves)
         sims_done += 1
-
-        # 还原棋盘
-        while move_stack:
-            mv, cap = move_stack.pop()
-            entry_stack.pop()
-            board.undo_move(*mv, cap)
+        # 本轮使用的 board 为独立副本，无需 undo 回滚。
 
     # 收集根子节点统计
     child_stats: Dict[Move4, Dict[str, float]] = {}

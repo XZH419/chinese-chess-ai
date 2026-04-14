@@ -277,6 +277,13 @@ class Board:
             self.state_counts[h_leave] = c - 1
         # 逆向恢复 Zobrist 哈希：异或顺序与 apply_move 相反
         piece = self.board[end_row][end_col]
+        if piece is None:
+            raise RuntimeError(
+                "undo_move failed: destination square is empty. "
+                f"move=({start_row},{start_col})->({end_row},{end_col}), "
+                f"captured={'None' if captured is None else (captured.color + ':' + captured.piece_type)}, "
+                f"current_player={self.current_player!r}, zobrist={self.zobrist_hash:#x}"
+            )
         sq_s = start_row * 9 + start_col
         sq_e = end_row * 9 + end_col
         h = self.zobrist_hash

@@ -359,6 +359,21 @@ def apply_pseudo_legal_with_rule_cache(
     未命中或需写入时：``apply`` 后用 ``pseudo_move_post_apply_flags_cached`` 判定，
     非法则 ``undo`` 并写入走子前缓存。
     """
+    # 防御式检查：在 MCTS/Minimax 的 apply/undo 高频路径中，
+    # 一旦有“从空格走子”或“吃友军/吃将”等异常走法混入，就会破坏 move_stack 的可逆性，
+    # 最终在 undo_move 时触发难以定位的状态崩溃。
+    sr, sc, er, ec = move
+    b = board.board
+    piece = b[sr][sc]
+    if piece is None or piece.color != mover:
+        return None
+    target = b[er][ec]
+    if target is not None:
+        if target.color == mover:
+            return None
+        if target.piece_type == "jiang":
+            return None
+
     pre_z = board.zobrist_hash
     if pre_move_cache is not None:
         hit = pre_move_cache.lookup_before_apply(board, move)
