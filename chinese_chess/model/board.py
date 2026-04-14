@@ -1,7 +1,6 @@
 """棋盘状态容器（模型层 Model）。
 
-本文件从旧实现 ``chinese-chess/ai/board.py`` 物理搬运而来，
-仅保留**纯状态管理**职责：
+本文件仅保留**纯状态管理**职责：
 
 - 棋盘网格的初始化与开局布局
 - ``get_piece`` / ``set_piece``：单格读写
@@ -9,8 +8,6 @@
 - ``undo_move``：撤销走子，还原棋盘
 - ``copy`` / ``column_mirror_copy``：棋盘复制与镜像
 
-所有规则逻辑（走法合法性、将军检测、走法生成、终局判定）
-已迁移至 ``chess/model/rules.py``。
 """
 
 from __future__ import annotations
