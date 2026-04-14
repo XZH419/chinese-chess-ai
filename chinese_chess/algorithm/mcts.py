@@ -53,7 +53,6 @@ from .search_move_helpers import (
     apply_pseudo_legal_with_rule_cache,
     fast_move_gives_check,
     pseudo_move_post_apply_flags,
-    try_fast_move_legality_and_opponent_check,
 )
 from .opening_book import OPENING_BOOK, mirror_move
 
@@ -103,6 +102,144 @@ def _parallel_workers_when_safe(requested: int) -> int:
 Move4 = Tuple[int, int, int, int]
 
 
+def _mcts_try_fast_move_legality_and_opponent_check_inline(
+    board: Board,
+    move: Move4,
+    mover: str,
+):
+    """MCTS 专用：虚拟走子后 ``(legal, opp_in_check)``，只读 ``board.board``，无闭包 cell()。
+
+    语义对齐 ``search_move_helpers.try_fast_move_legality_and_opponent_check``：
+    - 检测「飞将」与「车/炮/马/兵」的反向将军（覆盖 MCTS policy/rollout 的热点）。
+    - 对复杂/低频情况（如士/相/将造成将军）返回 ``None`` 让上层 fallback 到 apply/undo。
+    """
+    sr, sc, er, ec = move
+    if not (0 <= sr < 10 and 0 <= sc < 9 and 0 <= er < 10 and 0 <= ec < 9):
+        return None
+    b = board.board
+    piece = b[sr][sc]
+    if piece is None or piece.color != mover:
+        return None
+    captured = b[er][ec]
+    if captured is not None and captured.color == mover:
+        return None
+
+    # 士/相/将 的将军形态更绕（宫/象眼/邻近等），直接走慢路径即可
+    if piece.piece_type not in ("che", "pao", "ma", "bing"):
+        return None
+
+    # 虚拟将帅坐标（只在吃将/帅时变化；此快路径不处理 mover==jiang 的移动）
+    rk = board.red_king_pos
+    bk = board.black_king_pos
+    if captured is not None and captured.piece_type == "jiang":
+        if captured.color == "red":
+            rk = None
+        else:
+            bk = None
+
+    # ── 虚拟「将帅照面」判定（无 cell()）──
+    if rk is not None and bk is not None and rk[1] == bk[1]:
+        col = rk[1]
+        lo = rk[0] if rk[0] < bk[0] else bk[0]
+        hi = bk[0] if rk[0] < bk[0] else rk[0]
+        for r in range(lo + 1, hi):
+            if r == sr and col == sc:
+                p = None
+            elif r == er and col == ec:
+                p = piece
+            else:
+                p = b[r][col]
+            if p is not None:
+                break
+        else:
+            return False, False
+
+    def _virtual_is_king_in_check_at(kr: int, kc: int, defender: str) -> bool:
+        opponent = "black" if defender == "red" else "red"
+
+        # 车/炮：四向射线反向检测
+        for dr, dc in Rules._ORTH_DELTAS:
+            obstacles = 0
+            r, c = kr + dr, kc + dc
+            while 0 <= r < 10 and 0 <= c < 9:
+                if r == sr and c == sc:
+                    p = None
+                elif r == er and c == ec:
+                    p = piece
+                else:
+                    p = b[r][c]
+                if p is not None:
+                    if obstacles == 0:
+                        if p.color == opponent and p.piece_type == "che":
+                            return True
+                        obstacles = 1
+                    else:
+                        if p.color == opponent and p.piece_type == "pao":
+                            return True
+                        break
+                r += dr
+                c += dc
+
+        # 马：8 个攻击位 + 蹩腿
+        for ddr, ddc in Rules._MA_ATTACK_DELTAS:
+            hr, hc = kr + ddr, kc + ddc
+            if not (0 <= hr < 10 and 0 <= hc < 9):
+                continue
+            if hr == sr and hc == sc:
+                hp = None
+            elif hr == er and hc == ec:
+                hp = piece
+            else:
+                hp = b[hr][hc]
+            if hp is None or hp.color != opponent or hp.piece_type != "ma":
+                continue
+            leg_r, leg_c = Rules._ma_leg_square(hr, hc, kr, kc)
+            if not (0 <= leg_r < 10 and 0 <= leg_c < 9):
+                continue
+            if leg_r == sr and leg_c == sc:
+                legp = None
+            elif leg_r == er and leg_c == ec:
+                legp = piece
+            else:
+                legp = b[leg_r][leg_c]
+            if legp is not None:
+                continue
+            return True
+
+        # 兵/卒：三格反向检测
+        if defender == "red":
+            checks = ((kr - 1, kc), (kr, kc - 1), (kr, kc + 1))
+        else:
+            checks = ((kr + 1, kc), (kr, kc - 1), (kr, kc + 1))
+        for pr, pc in checks:
+            if 0 <= pr < 10 and 0 <= pc < 9:
+                if pr == sr and pc == sc:
+                    pp = None
+                elif pr == er and pc == ec:
+                    pp = piece
+                else:
+                    pp = b[pr][pc]
+                if pp is not None and pp.color == opponent and pp.piece_type == "bing":
+                    return True
+
+        return False
+
+    # ── 自将检测：虚拟走子后 mover 一方 king 是否被将军 ──
+    mk = rk if mover == "red" else bk
+    if mk is None:
+        return False, False
+    if _virtual_is_king_in_check_at(mk[0], mk[1], mover):
+        return False, False
+
+    # ── 对方是否被将军（揭线将军在此自然体现）──
+    opp = "black" if mover == "red" else "red"
+    ok = bk if mover == "red" else rk
+    if ok is None:
+        return True, False
+    gives = _virtual_is_king_in_check_at(ok[0], ok[1], opp)
+    return True, gives
+
+
 def mcts_fast_move_gives_check(
     board: Board,
     move: Move4,
@@ -111,7 +248,7 @@ def mcts_fast_move_gives_check(
 ) -> bool:
     """MCTS 专用：是否对对方将军（非法则 False）。
 
-    先查 ``mcts_cache``，再 ``try_fast_move_legality_and_opponent_check``（无 apply），
+    先查 ``mcts_cache``，再 MCTS 内联虚拟判定（无 apply），
     失败则 ``apply`` + ``pseudo_move_post_apply_flags`` 后 undo，并写回缓存。
     满 ``_MCTS_GIVES_CHECK_CAP`` 时整表 ``clear()``（非 LRU，仅服务单棵树搜索）。
     """
@@ -120,7 +257,7 @@ def mcts_fast_move_gives_check(
     if hit is not None:
         legal, gc = hit
         return gc if legal else False
-    res = try_fast_move_legality_and_opponent_check(board, move, mover)
+    res = _mcts_try_fast_move_legality_and_opponent_check_inline(board, move, mover)
     if res is not None:
         legal, gc = res
         if len(mcts_cache) >= _MCTS_GIVES_CHECK_CAP:
