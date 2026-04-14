@@ -614,10 +614,11 @@ def _run_single_mcts_tree(
     """
     # 临时观测日志：用于确认 Windows 下并行 worker 确实启动。
     # 该打印发生在子进程中（ProcessPoolExecutor worker）。
-    print(
-        f"[PID {os.getpid()}] Parallel worker started for MCTS "
-        f"(sims={max_simulations}, time_limit={time_limit})"
-    )
+    if os.environ.get("CHESSAI_PARALLEL_LOG") == "1":
+        print(
+            f"[PID {os.getpid()}] Parallel worker started for MCTS "
+            f"(sims={max_simulations}, time_limit={time_limit})"
+        )
     random.seed(time.time_ns() + seed_offset)
     t0 = time.time()
 

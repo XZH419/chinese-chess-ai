@@ -1,2 +1,0 @@
-# GUI 与 headless 核心依赖；也可使用 chinese_chess/requirements.txt
-PyQt5>=5.15
