@@ -1,5 +1,5 @@
-"""高性能纯 MCTS（Monte Carlo Tree Search）引擎。
-精简版：去除了冗余函数，合并了启发式偏置逻辑，优化了模拟路径。
+""" MCTS（Monte Carlo Tree Search）引擎。
+
 """
 
 from __future__ import annotations
@@ -27,6 +27,11 @@ _ROOT_BIAS_SCALE = 75.0
 _ROOT_VISITS_TIE_FRAC = 0.85
 _FPU_PRIOR_SCALE = 0.20
 _SELECTION_MAX_PLIES = 512
+
+
+def _deadline_reached(t0: float, tl: float) -> bool:
+    return time.perf_counter() - t0 >= tl
+
 
 Move4 = Tuple[int, int, int, int]
 
@@ -94,23 +99,34 @@ class MCTSNode:
         res = (None, None)
         for move, ch in self.children.items():
             v, rv = ch.visits, ch.rave_visits
-            if v + rv == 0: return move, ch
+            if v + rv == 0:
+                return move, ch
             beta = rv / (rv + v + _RAVE_CONST + 1e-5)
             exploit = (1.0 - beta) * (ch.wins / v if v > 0 else 0) + beta * (ch.rave_wins / rv if rv > 0 else 0)
-            score = exploit + _UCB_C * math.sqrt(log_parent / (v + 1e-5))
+            if log_parent > 0:
+                exploration = _UCB_C * math.sqrt(log_parent / (v + 1e-5))
+            else:
+                exploration = 0.0
+            score = exploit + exploration
+            if math.isnan(score):
+                continue
             if score > best_score:
                 best_score, res = score, (move, ch)
+        if res[0] is None and self.children:
+            return next(iter(self.children.items()))
         return res
 
 # ═══════════════════════════════════════════════════════════════
 #  搜索流程
 # ═══════════════════════════════════════════════════════════════
 
-def _simulate(board: Board, root_player: str) -> float:
+def _simulate(board: Board, root_player: str, t0: float, tl: float) -> float:
     """极致精简的 Rollout，去除了复杂的逃避逻辑以换取 SPS。"""
     sim_board = board.copy()
     limit = 30 if sim_board.piece_count() > 20 else 50
     for _ in range(limit):
+        if _deadline_reached(t0, tl):
+            return 0.5
         cp = sim_board.current_player
         moves = list(Rules.get_pseudo_legal_moves(sim_board, cp))
         if not moves: return 0.0 if cp == root_player else 1.0
@@ -132,17 +148,37 @@ def _run_single_mcts_tree(board: Board, max_sims: int, tl: float, seed: int = 0)
     random.seed(time.time_ns() + seed)
     t0, root_board = time.perf_counter(), board
     root = MCTSNode(board.zobrist_hash, "black" if board.current_player == "red" else "red")
-    tt, mcts_cache = {root.state_hash: root}, {}
+    # 不在扩展阶段复用「局面哈希 → 节点」：否则子边可能指向根/祖先，形成 DAG 回边，选择阶段会死循环。
+    mcts_cache: Dict = {}
     
+    max_sims = min(int(max_sims), 1_000_000)
     for _ in range(max_sims):
-        if time.perf_counter() - t0 >= tl: break
-        
+        if _deadline_reached(t0, tl):
+            break
+
         # 1. Selection & 2. Expansion
         sim_board, node, path = root_board.copy(), root, [root]
-        while node.untried_moves is not None and len(node.untried_moves) == 0 and node.children:
-            move, node = node.best_child_ucb(math.log(node.visits))
+        path_node_ids = {id(root)}
+        selection_depth = 0
+        while (
+            node.untried_moves is not None
+            and len(node.untried_moves) == 0
+            and node.children
+            and selection_depth < _SELECTION_MAX_PLIES
+        ):
+            if _deadline_reached(t0, tl):
+                break
+            logp = math.log(max(1, node.visits))
+            move, next_node = node.best_child_ucb(logp)
+            if move is None or next_node is None:
+                break
+            if id(next_node) in path_node_ids:
+                break
             sim_board.apply_move(*move)
+            path_node_ids.add(id(next_node))
+            node = next_node
             path.append(node)
+            selection_depth += 1
             
         if node.untried_moves is None:
             node.untried_moves = list(Rules.get_pseudo_legal_moves(sim_board, sim_board.current_player))
@@ -152,16 +188,13 @@ def _run_single_mcts_tree(board: Board, max_sims: int, tl: float, seed: int = 0)
             move = node.untried_moves.pop()
             sim_board.apply_move(*move)
             h = sim_board.zobrist_hash
-            if h in tt:
-                child = tt[h]
-            else:
-                bias = _get_tactical_bias(sim_board, sim_board.current_player, move, mcts_cache)
-                child = tt[h] = MCTSNode(h, sim_board.current_player, 0.1 + bias * _FPU_PRIOR_SCALE)
+            bias = _get_tactical_bias(sim_board, sim_board.current_player, move, mcts_cache)
+            child = MCTSNode(h, sim_board.current_player, 0.1 + bias * _FPU_PRIOR_SCALE)
             node.children[move] = child
             path.append(child)
 
         # 3. Simulation & 4. Backprop
-        res = _simulate(sim_board, root_board.current_player)
+        res = _simulate(sim_board, root_board.current_player, t0, tl)
         for i in range(len(path)-1, -1, -1):
             path[i].visits += 1
             if path[i].player_just_moved != root_board.current_player: path[i].wins += res
@@ -200,10 +233,21 @@ class MCTSAI:
 
         # 2. 搜索
         tl = self.time_limit if time_limit is None else float(time_limit)
+        if not math.isfinite(tl) or tl <= 0:
+            tl = float(self.time_limit)
         t0 = time.perf_counter()
         merged = _run_single_mcts_tree(board, self.max_simulations, tl)
 
         # 3. 决策：综合 Visits 和 战术偏置
+        if not merged:
+            legal = list(Rules.get_legal_moves(board, board.current_player))
+            self.last_stats = {
+                "time_taken": float(time.perf_counter() - t0),
+                "time_limit": float(tl),
+                "simulations": 0,
+            }
+            return random.choice(legal) if legal else None
+
         v_max = max((s["v"] for s in merged.values()), default=0)
         best_move, max_score = None, -1.0
         mcts_cache = {}
@@ -245,7 +289,9 @@ class MCTSAI:
             mirrored_board = board.column_mirror_copy()
             alt = OPENING_BOOK.get(mirrored_board.zobrist_hash)
             if alt: move = [mirror_move(m) for m in alt]
-        if move: return random.choice([m for m in move if Rules.is_valid_move(board, *m)[0]])
+        if move:
+            legal = [m for m in move if Rules.is_valid_move(board, *m)[0]]
+            return random.choice(legal) if legal else None
         return None
 
     def choose_move(self, *args, **kwargs):

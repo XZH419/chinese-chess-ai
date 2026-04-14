@@ -480,8 +480,8 @@ class MainWindow(QMainWindow):
     _PIECE_HIGHLIGHT_SCALE = 1.2
     # 棋子移动动画时长（毫秒）
     _ANIM_DURATION_MS = 160
-    # AI 后台线程的默认思考时间上限（秒）
-    _AI_TIME_LIMIT_S = 10
+    # AI 后台线程的默认思考时间上限（秒）；与 MCTSAI 默认一致，避免长时间卡死
+    _AI_TIME_LIMIT_S = 7
 
     def __init__(self, controller: Optional[GameController] = None, *, autostart: bool = False):
         """初始化主窗口。
@@ -725,7 +725,7 @@ class MainWindow(QMainWindow):
             return _create_ai_from_config({"ai_type": "minimax", "depth": spin.value()})
         if key == "mcts":
             return _create_ai_from_config(
-                {"ai_type": "mcts", "time_limit": 5.0, "max_simulations": spin.value()}
+                {"ai_type": "mcts", "time_limit": 7.0, "max_simulations": spin.value()}
             )
         return None
 

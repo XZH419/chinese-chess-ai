@@ -123,7 +123,7 @@ if __name__ == "__main__":
             return MinimaxAI(depth=depth)
         if kind == "mcts":
             return MCTSAI(
-                time_limit=10.0,
+                time_limit=7.0,
                 max_simulations=_default_sims(kind, sims),
                 verbose=False,
             )

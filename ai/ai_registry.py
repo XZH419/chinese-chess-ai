@@ -40,7 +40,7 @@ def _cfg_minimax(cfg: Dict[str, Any]) -> MinimaxAI:
 def _cfg_mcts(cfg: Dict[str, Any]) -> MCTSAI:
     return MCTSAI(
         max_simulations=int(cfg.get("max_simulations", 5000)),
-        time_limit=float(cfg.get("time_limit", 5.0)),
+        time_limit=float(cfg.get("time_limit", 7.0)),
         verbose=bool(cfg.get("verbose", False)),
     )
 
@@ -57,7 +57,7 @@ def _to_cfg_mcts(agent: MCTSAI) -> Dict[str, Any]:
     return {
         "ai_type": "mcts",
         "max_simulations": int(getattr(agent, "max_simulations", 5000)),
-        "time_limit": float(getattr(agent, "time_limit", 5.0)),
+        "time_limit": float(getattr(agent, "time_limit", 7.0)),
         "verbose": bool(getattr(agent, "verbose", False)),
     }
 
