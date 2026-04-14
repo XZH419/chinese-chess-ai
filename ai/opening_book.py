@@ -5,7 +5,7 @@
 - ``OPENING_SEQUENCE_BOOK``：键为从开局起的走子序列 ``Tuple[Move4, ...]``，
   值为该局面下的推荐着法列表（含镜像合并）。适合已知完整路径的调用方。
 - ``OPENING_BOOK``：由序列书回放棋盘得到的 **Zobrist Hash → 推荐着法**，
-  供 ``MinimaxAI`` / ``MCTSAI`` / ``MCTSMinimaxAI`` 等仅持有当前局面哈希的调用方 O(1) 查表。
+  供 ``MinimaxAI`` / ``MCTSAI`` 等仅持有当前局面哈希的调用方 O(1) 查表。
 
 **走法格式**：``(src_row, src_col, dst_row, dst_col)``。
 

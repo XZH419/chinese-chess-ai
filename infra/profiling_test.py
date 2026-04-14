@@ -265,14 +265,10 @@ def main() -> None:
             }
         )
 
-    # MCTS / MCTS-Minimax：同 simulations=1600，workers=1 vs workers=max
+    # MCTS：同 simulations=1600，workers=1 vs workers=max
     sims = 1600
 
     def _mk_mcts(workers: int) -> MCTSAI:
-        return MCTSAI(max_simulations=sims, time_limit=999.0, workers=workers, verbose=False)
-
-    def _mk_hybrid(workers: int) -> MCTSAI:
-        # 兼容：历史上此处对比的是另一个变体；现统一为纯 MCTS。
         return MCTSAI(max_simulations=sims, time_limit=999.0, workers=workers, verbose=False)
 
     for workers in (1, wmax):
@@ -292,30 +288,8 @@ def main() -> None:
             }
         )
 
-    hybrid_sps_workers1: Optional[float] = None
     mcts_sps_workers1: Optional[float] = None
-    hybrid_time_workers1: Optional[float] = None
     mcts_time_workers1: Optional[float] = None
-
-    for workers in (1, wmax):
-        t_med, sps = _measure_mcts_like(
-            cls_name="MCTSMinimaxAI",
-            make_ai=_mk_hybrid,
-            board=board,
-            simulations=sims,
-            workers=workers,
-        )
-        rows.append(
-            {
-                "AI": "MCTSMinimaxAI",
-                "Config": f"sims={sims}, workers={workers}",
-                "Median time (s)": _fmt_float(t_med),
-                "Throughput": f"{int(sps):,} sims/s",
-            }
-        )
-        if workers == 1:
-            hybrid_sps_workers1 = sps
-            hybrid_time_workers1 = t_med
 
     # 取回 MCTS workers=1 数据用于开销分析（从 rows 中解析最简单）
     for r in rows:
@@ -325,11 +299,6 @@ def main() -> None:
             mcts_sps_workers1 = float(r["Throughput"].split()[0].replace(",", ""))
             break
 
-    # 轻量开销估算：以 workers=1、相同 sims 的耗时比为准
-    overhead_pct = None
-    if hybrid_time_workers1 is not None and mcts_time_workers1 is not None and mcts_time_workers1 > 0:
-        overhead_pct = (hybrid_time_workers1 / mcts_time_workers1 - 1.0) * 100.0
-
     # 输出 Markdown 表格（仅脚本末尾输出）
     headers = ["AI", "Config", "Median time (s)", "Throughput"]
     print("| " + " | ".join(headers) + " |")
@@ -338,8 +307,6 @@ def main() -> None:
         print("| " + " | ".join(str(r[h]) for h in headers) + " |")
 
     print()
-    if overhead_pct is not None:
-        print(f"- **MCTSMinimaxAI 相对 MCTSAI（workers=1，sims={sims}）的额外开销**：约 {_fmt_float(overhead_pct, 1)}%")
 
     # 参数建议（≈3 秒/步）
     suggested_depth = _suggest_depth(minimax_rows)
@@ -348,17 +315,12 @@ def main() -> None:
     # 对 MCTS 系列，用 workers=max 的吞吐推算 3 秒模拟次数
     # 从 rows 中提取 workers=max 的 sps（字符串解析即可）
     mcts_sps_max = None
-    hybrid_sps_max = None
     for r in rows:
         if r["AI"] == "MCTSAI" and r["Config"] == f"sims={sims}, workers={wmax}":
             mcts_sps_max = float(r["Throughput"].split()[0].replace(",", ""))
-        if r["AI"] == "MCTSMinimaxAI" and r["Config"] == f"sims={sims}, workers={wmax}":
-            hybrid_sps_max = float(r["Throughput"].split()[0].replace(",", ""))
 
     if mcts_sps_max is not None:
         print(f"- **建议 MCTSAI 模拟次数**：`max_simulations≈{_suggest_simulations(mcts_sps_max):d}`（workers={wmax}，目标≈3.0s/步）")
-    if hybrid_sps_max is not None:
-        print(f"- **建议 MCTSMinimaxAI 模拟次数**：`max_simulations≈{_suggest_simulations(hybrid_sps_max):d}`（workers={wmax}，目标≈3.0s/步）")
 
 
 if __name__ == "__main__":

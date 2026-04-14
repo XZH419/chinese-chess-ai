@@ -46,16 +46,6 @@ def _cfg_mcts(cfg: Dict[str, Any]) -> MCTSAI:
     )
 
 
-def _cfg_mcts_minimax(cfg: Dict[str, Any]) -> MCTSAI:
-    """兼容旧键：mcts_minimax 已合并为纯 MCTS，统一走 MCTSAI。"""
-    return MCTSAI(
-        max_simulations=int(cfg.get("max_simulations", 5000)),
-        time_limit=float(cfg.get("time_limit", 10.0)),
-        workers=cfg.get("workers"),
-        verbose=bool(cfg.get("verbose", False)),
-    )
-
-
 def _to_cfg_random(_: RandomAI) -> Dict[str, Any]:
     return {"ai_type": "random"}
 
@@ -70,18 +60,6 @@ def _to_cfg_mcts(agent: MCTSAI) -> Dict[str, Any]:
         "ai_type": "mcts",
         "max_simulations": int(getattr(agent, "max_simulations", 5000)),
         "time_limit": float(getattr(agent, "time_limit", 5.0)),
-        "workers": (int(w) if w is not None else None),
-        "verbose": bool(getattr(agent, "verbose", False)),
-    }
-
-
-def _to_cfg_mcts_minimax(agent: MCTSAI) -> Dict[str, Any]:
-    """兼容旧键：保持 ai_type=mcts_minimax 以兼容 GUI/脚本配置。"""
-    w = getattr(agent, "workers", None)
-    return {
-        "ai_type": "mcts_minimax",
-        "max_simulations": int(getattr(agent, "max_simulations", 5000)),
-        "time_limit": float(getattr(agent, "time_limit", 10.0)),
         "workers": (int(w) if w is not None else None),
         "verbose": bool(getattr(agent, "verbose", False)),
     }
@@ -108,13 +86,6 @@ AI_REGISTRY: Dict[str, AIRegistryEntry] = {
         cls=MCTSAI,
         from_config=_cfg_mcts,
         to_config=_to_cfg_mcts,
-    ),
-    "mcts_minimax": AIRegistryEntry(
-        ai_type="mcts_minimax",
-        display_name="MCTS AI",
-        cls=MCTSAI,
-        from_config=_cfg_mcts_minimax,
-        to_config=_to_cfg_mcts_minimax,
     ),
 }
 

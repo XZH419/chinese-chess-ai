@@ -371,24 +371,24 @@ def main() -> None:
     a2 = RandomAI()
     results += run_match(a1, a2, rounds=4, experiment="A: MinimaxAI(depth=5) vs RandomAI")
 
-    # 实验 B：MinimaxAI(D=5) vs MCTSMinimaxAI(sims=8000, workers=8)，共 10 局（可自行改为 20）
+    # 实验 B：MinimaxAI(D=5) vs MCTSAI(sims=8000, workers=8)，共 10 局（可自行改为 20）
     b1 = MinimaxAI(depth=5)
     b2 = MCTSAI(max_simulations=8000, time_limit=999.0, workers=_safe_workers(8), verbose=False)
     results += run_match(
         b1,
         b2,
         rounds=10,
-        experiment="B: MinimaxAI(depth=5) vs MCTSMinimaxAI(sims=8000, workers=8)",
+        experiment="B: MinimaxAI(depth=5) vs MCTSAI(sims=8000, workers=8)",
     )
 
-    # 实验 C：MCTSAI(sims=8000, workers=8) vs MCTSMinimaxAI(sims=8000, workers=8)，共 10 局（可自行改为 20）
+    # 实验 C：MCTSAI(sims=8000, workers=8) vs MCTSAI(sims=8000, workers=8)，共 10 局（可自行改为 20）
     c1 = MCTSAI(max_simulations=8000, time_limit=999.0, workers=_safe_workers(8), verbose=False)
     c2 = MCTSAI(max_simulations=8000, time_limit=999.0, workers=_safe_workers(8), verbose=False)
     results += run_match(
         c1,
         c2,
         rounds=10,
-        experiment="C: MCTSAI(sims=8000, workers=8) vs MCTSMinimaxAI(sims=8000, workers=8)",
+        experiment="C: MCTSAI(sims=8000, workers=8) vs MCTSAI(sims=8000, workers=8)",
     )
 
     out_csv = Path("raw_data.csv")

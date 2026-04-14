@@ -14,20 +14,17 @@ from engine.rules import MoveEntry, Rules
 
 MAX_MOVES = 150  # 着法数上限，超过则停止对局（结果 None）
 
-_AI_KIND_ALLOWED = frozenset({"minimax", "mcts", "mcts_minimax", "random"})
-_LEGACY_TO_MCTS_MINIMAX = frozenset({"hybrid", "mcts_minmax"})
+_AI_KIND_ALLOWED = frozenset({"minimax", "mcts", "random"})
 
 
 def _normalize_engine(name: str) -> str:
     k = name.strip().lower().replace("-", "_")
-    if k in _LEGACY_TO_MCTS_MINIMAX:
-        return "mcts_minimax"
     return k
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="无头 AI 对弈基准（支持 Minimax / MCTS / MCTS-Minimax / Random）",
+        description="无头 AI 对弈基准（支持 Minimax / MCTS / Random）",
     )
     parser.add_argument("--games", type=int, default=10, help="对局数量")
     parser.add_argument(
@@ -35,14 +32,14 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default="minimax",
         metavar="ENGINE",
-        help="红方引擎：minimax|mcts|mcts_minimax|random",
+        help="红方引擎：minimax|mcts|random",
     )
     parser.add_argument(
         "--black-ai",
         type=str,
         default="minimax",
         metavar="ENGINE",
-        help="黑方引擎：minimax|mcts|mcts_minimax|random",
+        help="黑方引擎：minimax|mcts|random",
     )
     parser.add_argument("--red-depth", type=int, default=5, dest="red_depth", help="红方 Minimax 搜索深度（默认 5）")
     parser.add_argument("--black-depth", type=int, default=5, dest="black_depth", help="黑方 Minimax 搜索深度（默认 5）")
@@ -51,14 +48,14 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=3000,
         dest="red_sims",
-        help="红方 MCTS / MCTS-Minimax 的 max_simulations（默认 3000）",
+        help="红方 MCTS 的 max_simulations（默认 3000）",
     )
     parser.add_argument(
         "--black-sims",
         type=int,
         default=3000,
         dest="black_sims",
-        help="黑方 MCTS / MCTS-Minimax 的 max_simulations",
+        help="黑方 MCTS 的 max_simulations",
     )
     parser.set_defaults(stochastic=True)
     parser.add_argument(
@@ -105,8 +102,6 @@ def _engine_summary_cn(engine: str, depth: int, sims: int) -> str:
         return f"Minimax AI（深度 {depth}）"
     if e == "mcts":
         return f"MCTS AI（模拟上限 {sims}）"
-    if e == "mcts_minimax":
-        return f"MCTS-Minimax AI（模拟上限 {sims}）"
     if e == "random":
         return "随机 AI"
     return engine
@@ -117,9 +112,6 @@ def build_agent(engine: str, *, depth: int, sims: int, stochastic: bool) -> Any:
     if e == "minimax":
         return MinimaxAI(depth=depth, stochastic=stochastic, verbose=False)
     if e == "mcts":
-        return MCTSAI(time_limit=999.0, max_simulations=sims, verbose=False)
-    if e == "mcts_minimax":
-        # 兼容旧键：已合并为纯 MCTS
         return MCTSAI(time_limit=999.0, max_simulations=sims, verbose=False)
     if e == "random":
         return RandomAI()

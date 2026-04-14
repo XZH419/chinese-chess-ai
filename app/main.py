@@ -12,17 +12,11 @@
     # CLI 模式：MCTS vs Minimax
     python -m app.main cli --red mcts --black minimax
 
-    # MCTS-Minimax 引擎
-    python -m app.main cli --red mcts_minimax --black minimax --red-sims 3000
-
 支持的玩家类型：
     - ``human``: 人类玩家（CLI 手动输入 / GUI 鼠标点击）
     - ``minimax``: 极大极小搜索 AI（可配置搜索深度）
     - ``random``: 随机走子 AI
     - ``mcts``: 蒙特卡洛树搜索 AI
-    - ``mcts_minimax``: MCTS 主干 + Minimax 叶节点战术精算（统一名称）
-
-旧拼写（如 ``hybrid``、``mcts_minmax``）在解析时仍会规范为 ``mcts_minimax``。
 """
 
 import argparse
@@ -37,26 +31,17 @@ _AI_KIND_ALLOWED = frozenset(
         "random",
         "mcts",
         "mcts_ai",
-        "mcts_minimax",
-        "mcts_minimax_ai",
     }
 )
 
-# 已废弃的 CLI 写法 → 统一为 mcts_minimax（不改变算法，仅规范化）
-_LEGACY_AI_TO_MCTS_MINIMAX = frozenset({"hybrid", "mcts_minmax"})
-
 
 def _normalize_ai_kind(kind: str) -> str:
-    """将 CLI 字符串规范为内部引擎键 ``mcts_minimax`` 等。"""
+    """将 CLI 字符串规范为内部引擎键（如 ``mcts``、``minimax``）。"""
     k = kind.strip().lower().replace("-", "_")
-    if k in _LEGACY_AI_TO_MCTS_MINIMAX:
-        return "mcts_minimax"
     if k == "minimax_ai":
         return "minimax"
     if k == "mcts_ai":
         return "mcts"
-    if k == "mcts_minimax_ai":
-        return "mcts_minimax"
     return k
 
 
@@ -69,14 +54,14 @@ if __name__ == "__main__":
         type=str,
         default="human",
         metavar="KIND",
-        help="红方：human（玩家）|minimax|minimax_ai|random|mcts|mcts_ai|mcts_minimax|mcts_minimax_ai",
+        help="红方：human（玩家）|minimax|minimax_ai|random|mcts|mcts_ai",
     )
     parser.add_argument(
         "--black",
         type=str,
         default="minimax",
         metavar="KIND",
-        help="黑方：human（玩家）|minimax|minimax_ai|random|mcts|mcts_ai|mcts_minimax|mcts_minimax_ai",
+        help="黑方：human（玩家）|minimax|minimax_ai|random|mcts|mcts_ai",
     )
     parser.add_argument("--red-depth", type=int, default=5, help="红方为 Minimax 时的搜索深度（默认 5）")
     parser.add_argument("--black-depth", type=int, default=5, help="黑方为 Minimax 时的搜索深度（默认 5）")
@@ -85,14 +70,14 @@ if __name__ == "__main__":
         type=int,
         default=None,
         metavar="N",
-        help="红方 MCTS / MCTS-Minimax 的最大模拟次数；省略时 MCTS 默认 5000，MCTS-Minimax 默认 4000",
+        help="红方 MCTS 的最大模拟次数；省略时默认 5000",
     )
     parser.add_argument(
         "--black-sims",
         type=int,
         default=None,
         metavar="N",
-        help="黑方 MCTS / MCTS-Minimax 的最大模拟次数；省略时 MCTS 默认 5000，MCTS-Minimax 默认 4000",
+        help="黑方 MCTS 的最大模拟次数；省略时默认 5000",
     )
 
     args = parser.parse_args()
@@ -118,9 +103,9 @@ if __name__ == "__main__":
         """根据玩家类型字符串构建对应的 AI 代理实例。
 
         Args:
-            kind: 规范化后的玩家类型（``mcts_minimax``、``minimax`` 等）。
+            kind: 规范化后的玩家类型（``mcts``、``minimax`` 等）。
             depth: Minimax 搜索深度。
-            sims: MCTS / MCTS-Minimax 的 ``max_simulations``；``None`` 时按引擎类型取默认。
+            sims: MCTS 的 ``max_simulations``；``None`` 时取默认。
 
         Returns:
             AI 代理实例；若为 ``'human'`` 则返回 ``None``。
@@ -132,13 +117,6 @@ if __name__ == "__main__":
         if kind == "minimax":
             return MinimaxAI(depth=depth)
         if kind == "mcts":
-            return MCTSAI(
-                time_limit=10.0,
-                max_simulations=_default_sims(kind, sims),
-                verbose=False,
-            )
-        if kind == "mcts_minimax":
-            # 兼容旧键：已合并为纯 MCTS
             return MCTSAI(
                 time_limit=10.0,
                 max_simulations=_default_sims(kind, sims),

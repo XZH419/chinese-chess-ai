@@ -270,55 +270,6 @@ def cmd_profile_mcts(args: argparse.Namespace) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  子命令三：mcts_minimax（兼容别名；当前实现为纯 MCTS）
-# ═══════════════════════════════════════════════════════════════
-
-
-def cmd_profile_mcts_minimax(args: argparse.Namespace) -> None:
-    """兼容入口：历史上用于另一变体；现在统一调用纯 MCTS 单树。"""
-    from engine.board import Board
-    from ai.mcts_ai import _run_single_mcts_tree
-
-    sims = args.simulations
-    top_n = args.top
-
-    board = Board()
-    print(f"[MCTS 性能分析(兼容键 mcts_minimax)] 初始局面子力数: {board.piece_count()}")
-    print(
-        f"[MCTS 性能分析(兼容键 mcts_minimax)] cProfile: max_simulations={sims}, "
-        f"time_limit=999（无时间限制）"
-    )
-    print()
-
-    profiler = cProfile.Profile()
-    profiler.enable()
-
-    child_stats = _run_single_mcts_tree(
-        board=board,
-        max_simulations=sims,
-        time_limit=999.0,
-        seed_offset=0,
-    )
-
-    profiler.disable()
-
-    total_visits = sum(int(s["visits"]) for s in child_stats.values())
-    print(
-        f"搜索完成: {len(child_stats)} 个根着法分支，合计访问次数={total_visits}"
-    )
-    print()
-
-    stream = io.StringIO()
-    stats = pstats.Stats(profiler, stream=stream)
-    stats.sort_stats("cumtime")
-    stats.print_stats(top_n)
-    print(stream.getvalue())
-
-    print("=" * 72)
-    print("MCTS 性能分析完成。")
-
-
-# ═══════════════════════════════════════════════════════════════
 #  CLI 入口：argparse 子命令
 # ═══════════════════════════════════════════════════════════════
 
@@ -348,14 +299,6 @@ def main() -> None:
     p_mcts.add_argument("--simulations", type=int, default=2000, help="模拟次数（默认 2000）")
     p_mcts.add_argument("--top", type=int, default=30, help="打印热点条数（默认 30）")
     p_mcts.set_defaults(func=cmd_profile_mcts)
-
-    p_mcts_minimax = subparsers.add_parser(
-        "mcts_minimax",
-        help="兼容别名：MCTS 单核性能分析（默认 1500 次模拟）",
-    )
-    p_mcts_minimax.add_argument("--simulations", type=int, default=1500, help="模拟次数（默认 1500）")
-    p_mcts_minimax.add_argument("--top", type=int, default=30, help="打印热点条数（默认 30）")
-    p_mcts_minimax.set_defaults(func=cmd_profile_mcts_minimax)
 
     args = parser.parse_args()
     args.func(args)

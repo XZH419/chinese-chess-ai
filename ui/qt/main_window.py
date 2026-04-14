@@ -73,7 +73,6 @@ ENGINE_TO_DISPLAY_NAME: Dict[str, str] = {
     "human": "玩家",
     "mcts": "MCTS AI",
     "minimax": "Minimax AI",
-    "mcts_minimax": "MCTS-Minimax AI",
     "random": "随机 AI",
 }
 # 下拉框等「展示名 → 内部 key」；与上表互逆，单一数据源避免不一致
@@ -474,9 +473,9 @@ class MainWindow(QMainWindow):
     """
 
     # 下拉框顺序 = 内部引擎 key 顺序；展示名来自 ENGINE_TO_DISPLAY_NAME
-    _ENGINE_KEYS_ORDERED = ("human", "random", "minimax", "mcts", "mcts_minimax")
+    _ENGINE_KEYS_ORDERED = ("human", "random", "minimax", "mcts")
     _AI_TYPES = [ENGINE_TO_DISPLAY_NAME[k] for k in _ENGINE_KEYS_ORDERED]
-    _IDX_HUMAN, _IDX_RANDOM, _IDX_MINIMAX, _IDX_MCTS, _IDX_MCTS_MINIMAX = 0, 1, 2, 3, 4
+    _IDX_HUMAN, _IDX_RANDOM, _IDX_MINIMAX, _IDX_MCTS = 0, 1, 2, 3
 
     # 棋子选中 / 拿起时的放大倍率（模拟"悬浮"视觉效果）
     _PIECE_HIGHLIGHT_SCALE = 1.2
@@ -664,13 +663,6 @@ class MainWindow(QMainWindow):
             spin.setValue(5000)
             spin.setSingleStep(500)
             spin.show()
-        elif index == self._IDX_MCTS_MINIMAX:
-            label.setText("模拟次数：")
-            label.show()
-            spin.setRange(100, 100000)
-            spin.setValue(4000)
-            spin.setSingleStep(500)
-            spin.show()
         else:
             label.hide()
             spin.hide()
@@ -705,13 +697,6 @@ class MainWindow(QMainWindow):
             spin.setRange(100, 100000)
             spin.setValue(int(s))
             spin.show()
-        elif cls == "MCTSMinimaxAI":
-            s = getattr(agent, "max_simulations", 4000)
-            label.setText("模拟次数：")
-            label.show()
-            spin.setRange(100, 100000)
-            spin.setValue(int(s))
-            spin.show()
         else:
             label.hide()
             spin.hide()
@@ -739,15 +724,6 @@ class MainWindow(QMainWindow):
         if key == "mcts":
             return _create_ai_from_config(
                 {"ai_type": "mcts", "time_limit": 5.0, "max_simulations": spin.value()}
-            )
-        if key == "mcts_minimax":
-            return _create_ai_from_config(
-                {
-                    "ai_type": "mcts_minimax",
-                    "time_limit": 10.0,
-                    "max_simulations": spin.value(),
-                    "verbose": False,
-                }
             )
         return None
 
@@ -852,10 +828,6 @@ class MainWindow(QMainWindow):
             d = getattr(agent, "depth", None)
             return f"{base} · 深度 {d}" if isinstance(d, int) else base
         if key == "mcts":
-            s = getattr(agent, "max_simulations", None)
-            w = getattr(agent, "workers", 1)
-            return f"{base} · 模拟上限 {s} · 并行进程 {w}" if s is not None else base
-        if key == "mcts_minimax":
             s = getattr(agent, "max_simulations", None)
             w = getattr(agent, "workers", 1)
             return f"{base} · 模拟上限 {s} · 并行进程 {w}" if s is not None else base
@@ -1213,8 +1185,6 @@ class MainWindow(QMainWindow):
                 self.append_log("命中开局库 | 耗时: 0.0s")
             elif stats.get("random"):
                 self._log_random_stats(stats)
-            elif stats.get("probe_count") is not None and not stats.get("opening_book"):
-                self._log_mcts_minimax_stats(stats)
             elif stats.get("simulations") is not None:
                 self._log_mcts_stats(stats)
             else:
@@ -1262,31 +1232,6 @@ class MainWindow(QMainWindow):
         win_rate = stats.get("win_rate", "")
         if win_rate:
             self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — 估计胜率: {win_rate}")
-
-    def _log_mcts_minimax_stats(self, stats: dict) -> None:
-        """将 MCTS_Minimax_AI 搜索的统计信息写入日志。"""
-        mx = ENGINE_TO_DISPLAY_NAME["mcts_minimax"]
-        time_taken = stats.get("time_taken", 0)
-        time_str = (
-            f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
-        )
-        self.append_log(f"{mx} — 搜索耗时（秒）: {time_str}")
-        self.append_log(f"{mx} — 模拟次数: {stats.get('simulations', 0)}")
-        self.append_log(f"{mx} — 并行进程数: {stats.get('workers', 1)}")
-        win_rate = stats.get("win_rate", "")
-        if win_rate:
-            self.append_log(f"{mx} — 估计胜率: {win_rate}")
-        pc = stats.get("probe_count")
-        pn = stats.get("probe_nodes")
-        if pc is not None:
-            self.append_log(
-                f"{mx} — Minimax 子搜索次数: {pc}"
-                + (f"，子搜索节点数: {pn}" if pn is not None else "")
-            )
-        bc = stats.get("budget_calls_used")
-        bm = stats.get("budget_calls_max")
-        if bc is not None and bm is not None:
-            self.append_log(f"{mx} — 子搜索预算（调用次数）: {bc}/{bm}")
 
     def _log_minimax_stats(self, stats: dict) -> None:
         """将 Minimax 搜索统计信息格式化后写入日志。
