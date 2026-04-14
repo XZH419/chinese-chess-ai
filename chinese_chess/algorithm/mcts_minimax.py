@@ -1,42 +1,33 @@
-"""MCTS-Minimax 组合搜索引擎。
+"""MCTS-Minimax 混合博弈引擎 (MCTS-Hybrid)。
 
-本模块将 MCTS（全局探索 + RAVE + DAG 复用 + 多进程并行）与
-Minimax（局部战术精算 + 静止搜索 + 启发排序）融合为一个独立可运行的
-MCTS-Minimax 搜索引擎。
+本模块将 MCTS 的全局概率探索与 Minimax 的战术精算基因进行了深度融合。
+废弃了早期极其低效的“在模拟中嵌套浅层树搜索”的做法，转而提取 Minimax 的
+评估维度与战术本能，以极低的算力开销注入到 MCTS 的各个阶段。
 
-**核心架构**：
+**核心架构与融合设计**：
 
-    MCTS 仍然是主干搜索框架，负责全局探索、UCB1-RAVE 选择、
-    DAG 置换合并和根节点并行。Minimax 仅作为轻量级战术精算器，
-    在 rollout 截断点按需启用——当局面存在战术紧张度（被将军、
-    残局、大量吃子机会等）时，用 shallow negamax + alpha-beta +
-    静止搜索替代纯静态评估，获得更精准的叶节点估值。
+1. **静态评估引导扩展 (Prior Score Injection)**：
+   纯 MCTS 面对未知分支是盲目的。本架构在 Expansion 阶段，对生成的合法走法
+   立即调用 `Evaluation.evaluate()` 获取静态评估分，并作为“先验分数”注入。
+   这使得 MCTS 的算力像磁铁一样，优先向 Minimax 认为的“好棋”集中，极大收束搜索宽度。
 
-**关键设计决策**：
+2. **MVV-LVA 战术本能模拟 (Tactical Rollout)**：
+   在 Simulation 阶段，摒弃纯随机走子，引入 Minimax 经典的 MVV-LVA
+   (最有价值受害者 - 最无价值攻击者) O(1) 查表启发式。
+   如果存在划算的吃子（如兵吃马），模拟器将以极大概率直接选择该走法。这赋予了
+   瞎跑的模拟器以“动物本能”，使得最终的胜率反馈 (Result) 极其逼近真实棋手对弈。
 
-1. **走法为边属性**（DAG 安全）：
-   与 ``mcts.py`` 一致，走法存储在 ``children: Dict[Move4, MCTSMinimaxNode]``
-   的字典键中，Selection 阶段通过 ``(edge_move, child_node)`` 读取，
-   防止 DAG 结构下的"幽灵棋"Bug。
+3. **走法为边属性（DAG 安全机制）**：
+   与纯 MCTS 保持一致，走法作为 `children: Dict[Move4, MCTSMinimaxNode]` 的键，
+   规避 DAG 架构中多父节点复用引发的“幽灵棋”状态污染。
 
-2. **apply/undo 零拷贝树遍历**：
-   Selection + Expansion 在真实棋盘上操作，仅 Simulation 阶段做一次
-   ``board.copy()``。probe 在该副本上 apply/undo，零额外拷贝。
+4. **无锁并发与 RAVE 保留**：
+   继承了 `mcts.py` 的多进程 Worker 架构。模拟阶段哪怕被 MVV-LVA 接管，
+   依然会忠实记录双方尝试的着法，并通过 RAVE/AMAF 进行跨路径反向传播。
 
-3. **选择性 probe 触发**：
-   并非每次模拟都启动 minimax。仅当截断局面满足战术条件时才 probe，
-   大部分中局模拟走"纯 MCTS + 静态评估"快速路径，保持吞吐量。
-
-4. **RAVE 保留**：
-   即使 probe 替代了部分 rollout 的终点评估，rollout 过程中收集的
-   着法集合仍用于 RAVE/AMAF 反向传播，保持搜索早期的快速收敛。
-
-5. **per-tree probe 状态**：
-   probe TT / killer / history 在 ``_run_single_mcts_minimax_tree()`` 内部创建，
-   同一棵树的所有模拟共享这些表以积累经验；多进程 worker 之间
-   天然隔离，无需加锁。
+本模块以单次模拟微小的性能折损为代价，换取了局部战术敏锐度的指数级提升，
+实现了“宏观大局观（MCTS）”与“微观不漏杀（Minimax）”的完美平衡。
 """
-
 from __future__ import annotations
 
 import concurrent.futures
@@ -785,6 +776,53 @@ def _eval_to_winrate(board: Board, root_player: str) -> float:
     return 1.0 / (1.0 + math.exp(-raw / _SCORE_SCALE))
 
 
+def _mvv_lva_pick(board: Board, moves: List[Move4]) -> Move4:
+    """极速 MVV-LVA：仅在伪合法 moves 中挑“划算”的吃子，否则随机。
+
+    注意：该函数仅用于 MCTS-Minimax 的模拟阶段（rollout），不做合法性/自将校验。
+    """
+    # 项目内部 piece_type 采用：jiang/che/pao/ma/xiang/shi/bing
+    pv = {
+        "king": 10000,  # 兼容提示词
+        "jiang": 10000,
+        "che": 900,
+        "pao": 450,
+        "ma": 400,
+        "xiang": 200,
+        "shi": 200,
+        "bing": 100,
+    }
+    b = board.board
+    best: Optional[Move4] = None
+    best_score = 0
+    for m in moves:
+        victim = b[m[2]][m[3]]
+        if victim is None:
+            continue
+        attacker = b[m[0]][m[1]]
+        if attacker is None:
+            continue
+        score = int(pv.get(victim.piece_type, 0)) * 10 - int(pv.get(attacker.piece_type, 0))
+        if score > best_score:
+            best_score = score
+            best = m
+    if best is not None and best_score > 0:
+        return best
+    return random.choice(moves)
+
+
+def _rollout_pick_instinct_or_random(board: Board, moves: List[Move4]) -> Tuple[Move4, bool]:
+    """模拟阶段走子：50% MVV-LVA 战术本能，50% 纯随机；并执行 apply_move。"""
+    b = board.board
+    if random.random() < 0.5:
+        m = _mvv_lva_pick(board, moves)
+    else:
+        m = random.choice(moves)
+    was_capture = b[m[2]][m[3]] is not None
+    board.apply_move(*m)
+    return m, was_capture
+
+
 def _terminal_score(
     board: Board,
     root_player: str,
@@ -839,16 +877,11 @@ def _simulate_or_probe(
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
     path_history: Optional[List[MoveEntry]] = None,
 ) -> Tuple[float, Set[Move4], Set[Move4]]:
-    """轻量级伪合法 rollout + 分级选择性 minimax probe。
+    """轻量级伪合法 rollout + O(1) 静态启发式（不再做 negamax/QS probe）。
 
     与 ``mcts.py`` 的 ``_simulate()`` 流程一致，区别在于 rollout 截断后：
-    调用 ``_compute_probe_level()`` 做多因子评分判定，返回三级策略：
-
-    - **Level 0** — 不 probe，直接静态评估（快速路径）。
-    - **Level 1** — 轻量 probe（depth 1, QS depth 2, 无将军延伸）。
-    - **Level 2** — 标准 probe（depth 2~4, QS depth 4, 含将军延伸）。
-
-    probe 触发受 ``ProbeBudget`` 的调用次数上限、节点上限和冷却间隔约束。
+    不再向下展开搜索树（废弃 negamax/QS），仅使用一次 ``Evaluation.evaluate`` 作为
+    O(1) 先验估分。
 
     Args:
         gives_check_cache: 与本棵搜索树共用，加速 rollout 内 ``_move_gives_check``。
@@ -902,65 +935,15 @@ def _simulate_or_probe(
                     black_moves.add(king_cap)
                 return (1.0 if cp == root_player else 0.0), red_moves, black_moves
 
-        chosen, is_last_capture = _pick_rollout_move_fast(
-            sim_board,
-            moves,
-            b_grid,
-            gives_check_cache=gives_check_cache,
-            mcts_gives=probe_state.get("mcts_gives"),
-        )
+        chosen, is_last_capture = _rollout_pick_instinct_or_random(sim_board, moves)
         _append_path_move_entry(hist, sim_board, chosen, cp)
         if cp == "red":
             red_moves.add(chosen)
         else:
             black_moves.add(chosen)
 
-    # ── Rollout 截断：多因子评分 → 分级 probe 或快速静态评估 ──
-    current_pc = sim_board.piece_count()
-    budget: ProbeBudget = probe_state["budget"]
-
-    probe_level = _compute_probe_level(
-        sim_board, current_pc, budget, sims_done,
-        is_last_capture=is_last_capture,
-        node_visits=node_visits,
-        mcts_gives=probe_state.get("mcts_gives"),
-    )
-
-    if probe_level == 2:
-        # ── Level 2: 标准 probe ──
-        is_in_check = Rules.is_king_in_check(sim_board, sim_board.current_player)
-        depth = _probe_depth_for_position(current_pc, is_in_check)
-        nodes_before = probe_state["nodes"]
-        probe_state["probes"] += 1
-        raw = _probe_negamax(
-            sim_board, depth, float("-inf"), float("inf"), probe_state,
-            check_ext_left=_PROBE_MAX_CHECK_EXT,
-            qs_depth_limit=_PROBE_QS_DEPTH_LIMIT,
-        )
-        budget.record_probe(sims_done, probe_state["nodes"] - nodes_before)
-        if sim_board.current_player != root_player:
-            raw = -raw
-        result = 1.0 / (1.0 + math.exp(-raw / _SCORE_SCALE))
-
-    elif probe_level == 1:
-        # ── Level 1: 轻量 probe（浅搜索 + 浅 QS + 无将军延伸） ──
-        nodes_before = probe_state["nodes"]
-        probe_state["probes"] += 1
-        raw = _probe_negamax(
-            sim_board, _LIGHT_PROBE_DEPTH, float("-inf"), float("inf"),
-            probe_state,
-            check_ext_left=0,
-            qs_depth_limit=_LIGHT_PROBE_QS_DEPTH,
-        )
-        budget.record_probe(sims_done, probe_state["nodes"] - nodes_before)
-        if sim_board.current_player != root_player:
-            raw = -raw
-        result = 1.0 / (1.0 + math.exp(-raw / _SCORE_SCALE))
-
-    else:
-        # ── Level 0: 快速路径——纯静态评估 ──
-        result = _eval_to_winrate(sim_board, root_player)
-
+    # ── Rollout 截断：仅一次静态评估（O(1) 兜底），不再 probe ──
+    result = _eval_to_winrate(sim_board, root_player)
     return result, red_moves, black_moves
 
 
