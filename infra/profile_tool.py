@@ -243,16 +243,12 @@ def cmd_profile_mcts(args: argparse.Namespace) -> None:
     profiler = cProfile.Profile()
     profiler.enable()
 
-    result = _run_single_mcts_tree(
-        board=board,
-        max_simulations=sims,
-        time_limit=999.0,
-        seed_offset=0,
-    )
+    # _run_single_mcts_tree(board, max_sims, tl, seed=0)
+    result = _run_single_mcts_tree(board, sims, 999.0, 0)
 
     profiler.disable()
 
-    total_visits = sum(int(s["visits"]) for s in result.values())
+    total_visits = sum(int(s.get("v", 0)) for s in result.values())
     print(
         f"搜索完成: {len(result)} 个根着法分支，合计访问次数={total_visits}"
     )

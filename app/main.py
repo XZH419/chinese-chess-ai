@@ -48,6 +48,11 @@ def _normalize_ai_kind(kind: str) -> str:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="中国象棋 AI 启动入口")
     parser.add_argument("mode", nargs="?", default="cli", choices=["cli", "gui"], help="启动模式：cli 或 gui")
+    parser.add_argument(
+        "--autostart",
+        action="store_true",
+        help="GUI 模式下创建窗口后自动开始对局（默认：进入设置界面，等待点击「开始对局」）",
+    )
 
     parser.add_argument(
         "--red",
@@ -145,7 +150,7 @@ if __name__ == "__main__":
         from ui.qt.main_window import MainWindow
 
         app = QApplication(sys.argv)
-        window = MainWindow(controller=controller)
+        window = MainWindow(controller=controller, autostart=bool(args.autostart))
         window.show()
         sys.exit(app.exec_())
     else:

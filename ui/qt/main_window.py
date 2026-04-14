@@ -484,13 +484,15 @@ class MainWindow(QMainWindow):
     # AI 后台线程的默认思考时间上限（秒）
     _AI_TIME_LIMIT_S = 10
 
-    def __init__(self, controller: Optional[GameController] = None):
+    def __init__(self, controller: Optional[GameController] = None, *, autostart: bool = False):
         """初始化主窗口。
 
         Args:
             controller: 外部注入的游戏控制器实例。若为 ``None``，
-                则创建默认的玩家对玩家控制器。若注入的控制器
-                已绑定 AI 代理，窗口将自动同步 UI 配置并开始对局。
+                则创建默认的玩家对玩家控制器。
+            autostart: 是否在窗口创建后自动开始对局（默认 ``False``）。
+                典型用法：命令行启动 GUI 时先进入配置界面，用户手动点击
+                「开始对局」后再开局；如需保持旧行为可传 ``autostart=True``。
         """
         super().__init__()
 
@@ -510,7 +512,7 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self.status_label.setText("请配置红黑双方，然后点击「开始对局」")
 
-        # 外部注入已带 agent 的 controller 时：同步 UI 并自动开局
+        # 外部注入 controller 时：同步 UI 到注入的 agent 配置
         if controller is not None and (
             controller.red_agent is not None or controller.black_agent is not None
         ):
@@ -522,7 +524,8 @@ class MainWindow(QMainWindow):
             self._sync_param_from_agent(
                 controller.black_agent, self._black_param_label, self._black_param_spin
             )
-            self._on_start_stop()
+            if autostart:
+                self._on_start_stop()
 
     # ────────────────────── 窗口 / 布局 ──────────────────────
 
@@ -1098,8 +1101,30 @@ class MainWindow(QMainWindow):
         self._ai_response_queue = None
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """窗口关闭时结束 AI 子进程，避免残留 python.exe。"""
-        self._shutdown_ai_worker_process()
+        """窗口关闭时确保后台任务结束并退出应用。
+
+        该 GUI 会启动一个非 daemon 的 AI 子进程 + 一个 QThread 通信线程；
+        若不显式关闭，Windows 下关闭窗口后 python.exe 可能仍然存活。
+        """
+        try:
+            # 尽量先停对局（会停线程/关子进程）
+            if getattr(self, "is_game_running", False):
+                self._stop_game()
+            else:
+                # 即使未开局也要关掉可能残留的 worker
+                self._shutdown_ai_worker_process()
+        except Exception:
+            # 关闭路径不要阻塞或抛异常影响退出
+            try:
+                self._shutdown_ai_worker_process()
+            except Exception:
+                pass
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+        except Exception:
+            pass
         super().closeEvent(event)
 
     # ────────────────────── AI 后台线程 ──────────────────────
