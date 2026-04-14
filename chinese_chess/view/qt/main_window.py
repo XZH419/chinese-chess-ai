@@ -54,14 +54,12 @@ from PyQt5.QtWidgets import (
 )
 
 from chinese_chess.algorithm.ai_state_codec import (
-    build_ai_config_dict,
     serialize_board,
     serialize_move_history,
 )
-from chinese_chess.algorithm.minimax import MinimaxAI
-from chinese_chess.algorithm.mcts import MCTSAI
-from chinese_chess.algorithm.mcts_minimax import MCTSMinimaxAI
-from chinese_chess.algorithm.random_ai import RandomAI
+from chinese_chess.algorithm.ai_registry import build_ai_config_dict
+from chinese_chess.algorithm.ai_registry import engine_key_for_agent as _engine_key_for_agent
+from chinese_chess.algorithm.ai_registry import create_ai_from_config as _create_ai_from_config
 from chinese_chess.control.controller import GameController, MoveOutcome
 from chinese_chess.model.rules import Rules
 from chinese_chess.scripts.ai_worker import ai_worker_main, drain_queue, shutdown_worker
@@ -734,16 +732,21 @@ class MainWindow(QMainWindow):
         if key == "human":
             return None
         if key == "random":
-            return RandomAI()
+            return _create_ai_from_config({"ai_type": "random"})
         if key == "minimax":
-            return MinimaxAI(depth=spin.value())
+            return _create_ai_from_config({"ai_type": "minimax", "depth": spin.value()})
         if key == "mcts":
-            return MCTSAI(time_limit=5.0, max_simulations=spin.value())
+            return _create_ai_from_config(
+                {"ai_type": "mcts", "time_limit": 5.0, "max_simulations": spin.value()}
+            )
         if key == "mcts_minimax":
-            return MCTSMinimaxAI(
-                time_limit=10.0,
-                max_simulations=spin.value(),
-                verbose=False,
+            return _create_ai_from_config(
+                {
+                    "ai_type": "mcts_minimax",
+                    "time_limit": 10.0,
+                    "max_simulations": spin.value(),
+                    "verbose": False,
+                }
             )
         return None
 
@@ -833,18 +836,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _engine_key_for_agent(agent) -> str:
         """``None`` / 各类 AI 实例 → ``human`` / ``mcts`` / …（内部 key）。"""
-        if agent is None:
-            return "human"
-        cls = type(agent).__name__
-        if cls == "RandomAI":
-            return "random"
-        if cls == "MinimaxAI":
-            return "minimax"
-        if cls == "MCTSAI":
-            return "mcts"
-        if cls == "MCTSMinimaxAI":
-            return "mcts_minimax"
-        return "human"
+        return _engine_key_for_agent(agent)
 
     @staticmethod
     def _gui_agent_brief(agent) -> str:

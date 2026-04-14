@@ -5,32 +5,23 @@
 - **UCB1-RAVE 混合选择**：在传统 UCB1 置信上限公式的基础上，融合 RAVE
   (Rapid Action Value Estimation) / AMAF (All-Moves-As-First) 启发统计，
   使低访问量的着法也能借助模拟阶段的全局经验快速收敛。
-- **惰性走法展开**：``untried_moves`` 仅在节点首次需要展开时才调用走法生成器
-  （延迟求值），后续通过 ``pop()`` 逐个消费，避免在非叶节点上浪费走法生成开销。
-- **apply / undo 零拷贝树遍历**：Selection 与 Expansion 阶段直接在真实棋盘上
-  ``apply_move``，结束后通过 ``undo_move`` 栈严格还原——O(1) 回溯，无需深拷贝。
-- **动态截断轻量模拟**：Simulation 阶段根据场上子力数（开局 / 中局 / 残局）
-  自适应调整截断步数，配合 ``Evaluation.evaluate`` 兜底估分。
-- **__slots__ 节点内存优化**：海量节点使用 ``__slots__`` 声明，避免 Python 默认
-  ``__dict__`` 带来的额外内存开销。
-- **多进程根节点并行 (Root Parallelism)**：利用 ``ProcessPoolExecutor`` 将总模拟次数
-  分配给多个独立 worker，每个 worker 建一棵独立搜索树，搜索结束后在主进程合并
-  各棵树根子节点的 visits / wins / rave 统计。
-- **Zobrist 置换表 DAG 合并**：同一进程内的搜索树使用局部 Zobrist 置换表 ``tt``，
-  将不同着法序列到达的相同局面（哈希碰撞概率极低）合并为同一节点实例，
-  使搜索树退化为有向无环图 (DAG)，共享 visits / wins 统计，加速收敛。
+- **惰性走法展开**：`untried_moves` 仅在节点首次需要展开时才调用走法生成器
+  （延迟求值），后续通过 `pop()` 逐个消费，避免在非叶节点上浪费走法生成开销。
+- **非对称状态机与 O(1) 极限模拟 (核心性能亮点)**：在树的 Selection 与 Expansion 阶段，
+  保持极其严格的合法性校验；但在 Simulation 阶段，彻底放弃昂贵的防自杀/被将军检测，
+  允许生成伪合法“送将”走法，仅依靠 O(1) 的老将消失检测（吃将扫描）作为终局兜底。
+  通过“统计学惩罚代替物理拦截”，极限压榨 rollout 吞吐量。
+- **apply / undo 零拷贝遍历**：搜索期间直接在真实棋盘上 `apply_move`，结束后通过 
+  `undo_move` 栈严格还原——O(1) 回溯，全过程仅在模拟起点进行一次深拷贝。
+- **多进程根节点并行 (Root Parallelism)**：利用 `ProcessPoolExecutor` 分发模拟任务，
+  各 worker 独立建树，主进程无锁聚合根子节点的 visits / wins / rave 统计。
+- **Zobrist 置换表 DAG 合并**：将哈希值相同的局面合并为同一节点实例，搜索树退化为
+  有向无环图 (DAG)，不同着法序列共享胜率统计，极大加速残局收敛。
 
-**DAG 边属性设计（核心架构决策）**：
-
-    注意：在 DAG 结构中，一个节点可能拥有多个父节点。如果将走法 (move)
-    绑定在节点自身属性上，当不同的父节点通过**不同的走法**到达同一个子节点时，
-    Selection 阶段从子节点读取 ``node.move`` 会取到第一次创建时存储的走法，
-    而非当前路径上的走法——这就是"幽灵棋 (Ghost Move)"Bug。
-
-    解决方案：走法 (move) 存储于父节点 ``children`` 字典的**键**中
-    （即"边属性"），而非子节点自身的属性。Selection 阶段始终从
-    ``best_child_ucb()`` 返回的 ``(edge_move, child_node)`` 元组中
-    读取走法来执行 ``board.apply_move``，确保走法与当前路径严格一致。
+**DAG 边属性设计（架构防线）**：
+    注意：在 DAG 结构中，一个节点可能拥有多个父节点。必须将走法 (move) 存储于
+    父节点 `children` 字典的**键**中（即“边属性”），而非子节点自身的属性。
+    Selection 阶段始终从边上读取走法来执行落子，彻底杜绝多路径复用导致的“幽灵棋”Bug。
 """
 
 from __future__ import annotations
@@ -71,6 +62,8 @@ _ROLL_PREFER_CHECK = 0.64     # rollout 更常优先选将军着法
 _ROLL_PREFER_HVCAP = 0.66     # 更常优先高价值吃子
 _ROLL_PREFER_ANY_CAPTURE = 0.80
 _ROLL_PREFER_AGGRESSIVE = 0.50  # 更常选过河/压境类推进
+# Expansion FPU：把轻量 policy 偏置注入为“虚拟胜率”，让高质量走法不必等到首次模拟才抬头
+_FPU_PRIOR_SCALE = 0.30  # prior = 0.5 + clamp(bias * scale)
 # 根 tie-break：_policy_attack_bias 内对将军 / 攻击性推进的加分上限分量
 _POLICY_BIAS_CHECK_COMPONENT = 0.42
 _POLICY_BIAS_AGGRESSIVE_PUSH_COMPONENT = 0.16
@@ -469,6 +462,8 @@ class MCTSNode:
         self,
         state_hash: int,
         player_just_moved: str,
+        *,
+        prior_bias: float = 0.0,
     ):
         """初始化一个空白搜索节点。
 
@@ -478,8 +473,14 @@ class MCTSNode:
         """
         self.state_hash = state_hash
         self.children: Dict[Move4, MCTSNode] = {}
-        self.visits: int = 0
-        self.wins: float = 0.0
+        # FPU (First Play Urgency)：允许在创建节点时注入少量“虚拟访问/胜率”，
+        # 让高价值走法在 visits=0 阶段也能通过 UCB 利用项获得更高优先级。
+        if prior_bias > 0.0:
+            self.visits = 1
+            self.wins = prior_bias
+        else:
+            self.visits = 0
+            self.wins = 0.0
         self.untried_moves: Optional[List[Move4]] = None
         self.player_just_moved = player_just_moved
         self.rave_visits: int = 0
@@ -667,7 +668,13 @@ def _run_single_mcts_tree(
         expanded = False
         if node.untried_moves:
             result = _expand_one(
-                board, node, move_stack, entry_stack, tt, gives_check_cache
+                board,
+                node,
+                move_stack,
+                entry_stack,
+                tt,
+                gives_check_cache,
+                mcts_gives=mcts_gives,
             )
             if result is not None:
                 _exp_move, child = result
@@ -726,6 +733,8 @@ def _expand_one(
     entry_stack: List[MoveEntry],
     tt: Dict[int, MCTSNode],
     gives_check_cache: MoveGivesCheckCache,
+    *,
+    mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
 ) -> Optional[Tuple[Move4, MCTSNode]]:
     """从当前节点的 ``untried_moves`` 中弹出一个合法走法，建立父子"边"。
 
@@ -771,9 +780,15 @@ def _expand_one(
         if existing is not None:
             node.children[move] = existing
             return move, existing
+        # FPU Prior：用 O(1) policy_attack_bias 构造虚拟胜率，避免未访问节点全等价导致“视而不见”
+        bias = _policy_attack_bias(
+            board, mover, move, gives_check_cache, mcts_gives=mcts_gives,
+        )
+        prior = 0.5 + min(0.45, max(0.0, bias) * _FPU_PRIOR_SCALE)
         child = MCTSNode(
             state_hash=child_hash,
             player_just_moved=mover,
+            prior_bias=prior,
         )
         tt[child_hash] = child
         node.children[move] = child
@@ -832,6 +847,48 @@ def _simulate(
         moves = list(Rules.get_pseudo_legal_moves(sim_board, cp))
         if not moves:
             return (0.0 if cp == root_player else 1.0), red_moves, black_moves
+
+        # 被将军响应（O(1) 判断）：若上一手给将，则当前方优先尝试“解除将军”的走法，
+        # 避免在被将军时继续乱走导致统计信噪比崩盘。
+        #
+        # 关键：不调用 Rules.is_valid_move；仅在需要时走一次轻量 apply/undo 合法性路径，
+        # 且仅在“被将军”这一小概率状态下触发。
+        if hist and hist[-1].gave_check:
+            escape: List[Move4] = []
+            mover = cp
+            for m in moves:
+                res = _mcts_try_fast_move_legality_and_opponent_check_inline(sim_board, m, mover)
+                if res is not None:
+                    legal, _gc = res
+                    if legal:
+                        escape.append(m)
+                    continue
+                # fallback：apply/undo + post flags（依旧是局部缓存加速）
+                applied = apply_pseudo_legal_with_rule_cache(
+                    sim_board,
+                    m,
+                    mover,
+                    pre_move_cache=gives_check_cache,
+                    post_apply_cache=(gives_check_cache.post_apply_cache if gives_check_cache is not None else None),
+                )
+                if applied is None:
+                    continue
+                captured, _opp_in_check = applied
+                sim_board.undo_move(*m, captured)
+                escape.append(m)
+            if escape:
+                chosen = random.choice(escape)
+                sim_board.apply_move(*chosen)
+                _append_path_move_entry(hist, sim_board, chosen, cp)
+                if cp == "red":
+                    red_moves.add(chosen)
+                else:
+                    black_moves.add(chosen)
+                if sim_board.red_king_pos is None:
+                    return (0.0 if root_player == "red" else 1.0), red_moves, black_moves
+                if sim_board.black_king_pos is None:
+                    return (1.0 if root_player == "red" else 0.0), red_moves, black_moves
+                continue
 
         # 一击必杀：扫描对方老将坐标，若有可直达的着法立即执行并判胜。
         # 因为 get_pseudo_legal_moves 不生成吃将着法，所以需要专门检测。
@@ -942,6 +999,16 @@ def _find_king_capture(
                 if (tkr == r + 1 and tkc == c) or (r >= 5 and tkr == r and abs(tkc - c) == 1):
                     return (r, c, tkr, tkc)
 
+        # 将/帅：宫内邻近一步（补全“一击必杀”覆盖面，开销为 O(1)）
+        elif pt == "jiang":
+            if abs(tkr - r) + abs(tkc - c) == 1:
+                if attacker == "red":
+                    if 7 <= tkr <= 9 and 3 <= tkc <= 5:
+                        return (r, c, tkr, tkc)
+                else:
+                    if 0 <= tkr <= 2 and 3 <= tkc <= 5:
+                        return (r, c, tkr, tkc)
+
     return None
 
 
@@ -958,6 +1025,15 @@ def _pick_rollout_move_fast(
     注意：模拟阶段允许“送将/自杀”以换取吞吐量；终局仅靠「吃将」与「将消失」兜底。
     返回 ``(move, 是否为吃子)``，后者供 ``mcts_minimax`` 模块中 probe 触发等逻辑使用。
     """
+    # 贪婪吃子（仅用 b_grid[er][ec] 是否为 None 判断，不做完整合法性检测）
+    captures: List[Move4] = []
+    for m in moves:
+        if b_grid[m[2]][m[3]] is not None:
+            captures.append(m)
+    if captures and random.random() < _ROLL_PREFER_ANY_CAPTURE:
+        m_pick = random.choice(captures)
+        sim_board.apply_move(*m_pick)
+        return m_pick, True
     m_pick = random.choice(moves)
     was_capture = b_grid[m_pick[2]][m_pick[3]] is not None
     sim_board.apply_move(*m_pick)

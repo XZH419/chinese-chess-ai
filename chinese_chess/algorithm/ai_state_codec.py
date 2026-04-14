@@ -12,6 +12,7 @@ from chinese_chess.model.board import Board
 from chinese_chess.model.piece import Piece
 from chinese_chess.model import zobrist
 from chinese_chess.model.rules import MoveEntry
+from chinese_chess.algorithm.ai_registry import build_ai_config_dict as _build_ai_config_dict
 
 _SCHEMA_VERSION = 1
 
@@ -111,31 +112,9 @@ def deserialize_move_history(data: Optional[List[Dict[str, Any]]]) -> List[MoveE
 
 
 def build_ai_config_dict(agent) -> Dict[str, Any]:
-    """从当前 GUI 上的 AI 实例提取可重建配置（仅数据）。"""
-    if agent is None:
-        raise ValueError("agent is None")
-    name = type(agent).__name__
-    if name == "RandomAI":
-        return {"ai_type": "random"}
-    if name == "MinimaxAI":
-        return {"ai_type": "minimax", "depth": int(getattr(agent, "depth", 5))}
-    if name == "MCTSAI":
-        w = getattr(agent, "workers", None)
-        return {
-            "ai_type": "mcts",
-            "max_simulations": int(getattr(agent, "max_simulations", 5000)),
-            "time_limit": float(getattr(agent, "time_limit", 5.0)),
-            "workers": (int(w) if w is not None else None),
-            "verbose": False,
-        }
-    if name == "MCTSMinimaxAI":
-        w = getattr(agent, "workers", None)
-        return {
-            "ai_type": "mcts_minimax",
-            "max_simulations": int(getattr(agent, "max_simulations", 4000)),
-            "time_limit": float(getattr(agent, "time_limit", 10.0)),
-            "workers": (int(w) if w is not None else None),
-            "probe_depth": int(getattr(agent, "probe_depth", 2)),
-            "verbose": False,
-        }
-    raise TypeError(f"unsupported AI type: {name}")
+    """从 AI 实例提取可重建配置（仅数据）。
+
+    兼容入口：历史上 GUI 通过本模块提取 AI 配置；现在配置协议统一由
+    ``chinese_chess.algorithm.ai_registry`` 维护，本函数仅做转发。
+    """
+    return _build_ai_config_dict(agent)

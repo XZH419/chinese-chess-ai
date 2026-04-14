@@ -17,35 +17,7 @@ from chinese_chess.algorithm.ai_state_codec import (
     deserialize_board,
     deserialize_move_history,
 )
-from chinese_chess.algorithm.minimax import MinimaxAI
-from chinese_chess.algorithm.mcts import MCTSAI
-from chinese_chess.algorithm.mcts_minimax import MCTSMinimaxAI
-from chinese_chess.algorithm.random_ai import RandomAI
-
-
-def create_ai_from_config(cfg: Dict[str, Any]):
-    """由纯数据配置构造 AI 实例（子进程内调用）。"""
-    t = cfg["ai_type"]
-    if t == "random":
-        return RandomAI()
-    if t == "minimax":
-        return MinimaxAI(depth=int(cfg.get("depth", 5)))
-    if t == "mcts":
-        return MCTSAI(
-            max_simulations=int(cfg.get("max_simulations", 5000)),
-            time_limit=float(cfg.get("time_limit", 5.0)),
-            workers=cfg.get("workers"),
-            verbose=bool(cfg.get("verbose", False)),
-        )
-    if t == "mcts_minimax":
-        return MCTSMinimaxAI(
-            max_simulations=int(cfg.get("max_simulations", 4000)),
-            time_limit=float(cfg.get("time_limit", 10.0)),
-            workers=cfg.get("workers"),
-            probe_depth=int(cfg.get("probe_depth", 2)),
-            verbose=bool(cfg.get("verbose", False)),
-        )
-    raise ValueError(f"unknown ai_type: {t!r}")
+from chinese_chess.algorithm.ai_registry import create_ai_from_config
 
 
 def process_search_request(msg: Dict[str, Any]) -> Dict[str, Any]:
