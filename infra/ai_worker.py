@@ -3,7 +3,7 @@
 GUI 主进程仅通过 ``multiprocessing.Queue`` 发送纯数据请求并取回结果，
 避免在 ``QThread`` 中直接调用 ``ProcessPoolExecutor``（Windows 上易死锁）。
 
-``chinese_chess.algorithm.ai_state_codec`` 负责棋盘与历史的序列化。
+`infra.ai_state_codec` 负责棋盘与历史的序列化。
 """
 
 from __future__ import annotations
@@ -13,11 +13,11 @@ import traceback
 from queue import Empty
 from typing import Any, Dict, Optional
 
-from chinese_chess.algorithm.ai_state_codec import (
+from infra.ai_state_codec import (
     deserialize_board,
     deserialize_move_history,
 )
-from chinese_chess.algorithm.ai_registry import create_ai_from_config
+from ai.ai_registry import create_ai_from_config
 
 
 def process_search_request(msg: Dict[str, Any]) -> Dict[str, Any]:

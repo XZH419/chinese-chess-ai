@@ -15,8 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
-from chinese_chess.model.board import Board
-from chinese_chess.model.rules import MoveEntry, Rules
+from engine.board import Board
+from engine.rules import MoveEntry, Rules
 
 
 def describe_player_agent(agent: Optional[Any]) -> str:

@@ -8,25 +8,15 @@
 用法（仓库根目录）::
 
     # Minimax 性能分析（depth=5，中局 + 残局，绕过开局库）
-    python -m chinese_chess.scripts.profile_tool minimax
-    python -m chinese_chess.scripts.profile_tool minimax --depth 4 --plies 15 --top 20
+    python -m infra.profile_tool minimax
+    python -m infra.profile_tool minimax --depth 4 --plies 15 --top 20
 
     # MCTS 单核极限热点（2000 次模拟，初始局面）
-    python -m chinese_chess.scripts.profile_tool mcts
-    python -m chinese_chess.scripts.profile_tool mcts --simulations 5000 --top 20
+    python -m infra.profile_tool mcts
+    python -m infra.profile_tool mcts --simulations 5000 --top 20
 """
 
 from __future__ import annotations
-
-import sys
-import os
-
-# ── 路径修复 ──
-# 本文件位于 chinese_chess/scripts/ 下，需要将项目根目录（上两级）加入
-# sys.path，才能正确 import chinese_chess.* 包。
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
 
 import argparse
 import cProfile
@@ -78,7 +68,7 @@ def _play_legal_plies(board, n: int) -> int:
     Returns:
         实际执行的合法步数。
     """
-    from chinese_chess.model.rules import Rules
+    from engine.rules import Rules
 
     played = 0
     for _ in range(n):
@@ -109,7 +99,7 @@ def build_midgame_board(plies: int = 10):
     Returns:
         处于中局阶段的 Board 实例。
     """
-    from chinese_chess.model.board import Board
+    from engine.board import Board
 
     board = Board()
     _play_legal_plies(board, plies)
@@ -124,9 +114,9 @@ def build_sparse_endgame_board():
     Returns:
         处于残局阶段的 Board 实例。
     """
-    from chinese_chess.model import zobrist
-    from chinese_chess.model.board import Board
-    from chinese_chess.model.piece import Piece
+    from engine import zobrist
+    from engine.board import Board
+    from engine.piece import Piece
 
     b = Board()
     for r in range(b.rows):
@@ -179,7 +169,7 @@ def _run_minimax_scenario(
         depth: Minimax 搜索深度。
         top_n: 打印前 N 条热点。
     """
-    from chinese_chess.algorithm.minimax import MinimaxAI
+    from ai.minimax_ai import MinimaxAI
 
     ai = MinimaxAI(depth=depth, verbose=False)
     pr = cProfile.Profile()
@@ -206,8 +196,8 @@ def cmd_profile_minimax(args: argparse.Namespace) -> None:
     Args:
         args: 命令行参数（含 ``depth``、``plies``、``top``）。
     """
-    from chinese_chess.model.board import Board
-    from chinese_chess.model.rules import Rules
+    from engine.board import Board
+    from engine.rules import Rules
 
     depth = args.depth
     plies = args.plies
@@ -239,8 +229,8 @@ def cmd_profile_mcts(args: argparse.Namespace) -> None:
     Args:
         args: 命令行参数（含 ``simulations`` 和 ``top``）。
     """
-    from chinese_chess.model.board import Board
-    from chinese_chess.algorithm.mcts import _run_single_mcts_tree
+    from engine.board import Board
+    from ai.mcts_ai import _run_single_mcts_tree
 
     sims = args.simulations
     top_n = args.top
@@ -286,8 +276,8 @@ def cmd_profile_mcts(args: argparse.Namespace) -> None:
 
 def cmd_profile_mcts_minimax(args: argparse.Namespace) -> None:
     """MCTS-Minimax 单树性能分析：调用 ``_run_single_mcts_minimax_tree``。"""
-    from chinese_chess.model.board import Board
-    from chinese_chess.algorithm.mcts_minimax import _run_single_mcts_minimax_tree
+    from engine.board import Board
+    from ai.mcts_minimax_ai import _run_single_mcts_minimax_tree
 
     sims = args.simulations
     top_n = args.top

@@ -15,18 +15,18 @@ from __future__ import annotations
 # 目前先做“转发/再导出”，以最小改动消除跨文件直接 import 私有符号。
 # 后续重构可把实现从 `mcts.py` 挪到本模块，再反向让 `mcts.py` 导入。
 
-from .mcts import Move4
-from .mcts import _append_path_move_entry
-from .mcts import _is_aggressive_push
-from .mcts import _move_gives_check
-from .mcts import _order_untried_moves_policy
-from .mcts import _parallel_workers_when_safe
-from .mcts import _pick_rollout_move_fast
-from .mcts import _policy_attack_bias
-from .mcts import _POLICY_HVCAP_VALUE
-from .mcts import _ROOT_BIAS_SCALE
-from .mcts import _ROOT_VISITS_TIE_FRAC
-from .mcts import _SELECTION_MAX_PLIES
+from ai.mcts_ai import Move4
+from ai.mcts_ai import _append_path_move_entry
+from ai.mcts_ai import _is_aggressive_push
+from ai.mcts_ai import _move_gives_check
+from ai.mcts_ai import _order_untried_moves_policy
+from ai.mcts_ai import _parallel_workers_when_safe
+from ai.mcts_ai import _pick_rollout_move_fast
+from ai.mcts_ai import _policy_attack_bias
+from ai.mcts_ai import _POLICY_HVCAP_VALUE
+from ai.mcts_ai import _ROOT_BIAS_SCALE
+from ai.mcts_ai import _ROOT_VISITS_TIE_FRAC
+from ai.mcts_ai import _SELECTION_MAX_PLIES
 
 __all__ = [
     "Move4",

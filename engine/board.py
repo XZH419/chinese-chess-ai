@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Set, Tuple
 
-from . import zobrist
-from .piece import Piece
+from engine import zobrist
+from engine.piece import Piece
 
 
 class Board:

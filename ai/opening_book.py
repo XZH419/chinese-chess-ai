@@ -23,8 +23,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-from chinese_chess.model.board import Board
-from chinese_chess.model.rules import Rules
+from engine.board import Board
+from engine.rules import Rules
 
 # 走法四元组：(起始行, 起始列, 目标行, 目标列)
 Move4 = Tuple[int, int, int, int]

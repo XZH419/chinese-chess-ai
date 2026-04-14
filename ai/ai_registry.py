@@ -13,10 +13,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Type
 
-from chinese_chess.algorithm.minimax import MinimaxAI
-from chinese_chess.algorithm.mcts import MCTSAI
-from chinese_chess.algorithm.mcts_minimax import MCTSMinimaxAI
-from chinese_chess.algorithm.random_ai import RandomAI
+from ai.minimax_ai import MinimaxAI
+from ai.mcts_ai import MCTSAI
+from ai.mcts_minimax_ai import MCTSMinimaxAI
+from ai.random_ai import RandomAI
 
 
 @dataclass(frozen=True, slots=True)

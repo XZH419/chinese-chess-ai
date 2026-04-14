@@ -10,7 +10,7 @@
     - ``MainWindow``: 主窗口，管理"配置 → 开始 → 对局 → 结束"的完整生命周期。
 
 **搜索架构**：``get_best_move`` / ``choose_move`` 在单独的 ``multiprocessing.Process``
-中执行（见 ``chinese_chess.scripts.ai_worker``），避免在 ``QThread`` 内嵌套
+中执行（见 ``infra.ai_worker``），避免在 ``QThread`` 内嵌套
 ``ProcessPoolExecutor`` 导致 Windows 上卡死；MCTS / MCTS-Minimax 可在子进程内
 使用多进程 worker（子进程主线程调用搜索，``_parallel_workers_when_safe`` 不再被误降为 1）。
 """
@@ -53,16 +53,16 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from chinese_chess.algorithm.ai_state_codec import (
+from infra.ai_state_codec import (
     serialize_board,
     serialize_move_history,
 )
-from chinese_chess.algorithm.ai_registry import build_ai_config_dict
-from chinese_chess.algorithm.ai_registry import engine_key_for_agent as _engine_key_for_agent
-from chinese_chess.algorithm.ai_registry import create_ai_from_config as _create_ai_from_config
-from chinese_chess.control.controller import GameController, MoveOutcome
-from chinese_chess.model.rules import Rules
-from chinese_chess.scripts.ai_worker import ai_worker_main, drain_queue, shutdown_worker
+from ai.ai_registry import build_ai_config_dict
+from ai.ai_registry import engine_key_for_agent as _engine_key_for_agent
+from ai.ai_registry import create_ai_from_config as _create_ai_from_config
+from app.controller import GameController, MoveOutcome
+from engine.rules import Rules
+from infra.ai_worker import ai_worker_main, drain_queue, shutdown_worker
 
 
 Move = Tuple[int, int, int, int]
@@ -86,7 +86,7 @@ def _assets_dir() -> str:
     """获取统一资源图片目录的绝对路径。
 
     Returns:
-        str: ``chinese_chess/resources/img`` 目录的规范化绝对路径。
+        str: ``ui/resources/img`` 目录的规范化绝对路径。
     """
     return os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "..", "resources", "img")

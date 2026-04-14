@@ -33,15 +33,15 @@ import random
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from chinese_chess.model.rules import MoveEntry, Rules
+from engine.rules import MoveEntry, Rules
 
-from .evaluation import Evaluation
-from .search_move_helpers import (
+from ai.evaluation import Evaluation
+from ai.search_move_helpers import (
     MoveGivesCheckCache,
     PostApplyFlagsCache,
     apply_pseudo_legal_with_rule_cache,
 )
-from .opening_book import OPENING_BOOK, mirror_move
+from ai.opening_book import OPENING_BOOK, mirror_move
 
 # ==================== 置换表边界类型常量 ====================
 # 置换表中需要记录该分数与搜索窗口 [alpha, beta] 的关系，

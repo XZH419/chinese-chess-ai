@@ -4,21 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import os
-import sys
 from typing import Any, Optional, Tuple
 
-# 保证从仓库根目录执行时 `import chinese_chess` 可用
-_ROOT = os.path.dirname(os.path.abspath(__file__))
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
-
-from chinese_chess.algorithm.minimax import MinimaxAI
-from chinese_chess.algorithm.mcts import MCTSAI
-from chinese_chess.algorithm.mcts_minimax import MCTSMinimaxAI
-from chinese_chess.algorithm.random_ai import RandomAI
-from chinese_chess.model.board import Board
-from chinese_chess.model.rules import MoveEntry, Rules
+from ai.minimax_ai import MinimaxAI
+from ai.mcts_ai import MCTSAI
+from ai.mcts_minimax_ai import MCTSMinimaxAI
+from ai.random_ai import RandomAI
+from engine.board import Board
+from engine.rules import MoveEntry, Rules
 
 MAX_MOVES = 150  # 着法数上限，超过则停止对局（结果 None）
 

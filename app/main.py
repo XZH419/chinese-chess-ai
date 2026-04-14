@@ -7,13 +7,13 @@
 启动示例::
 
     # GUI 模式：人类 vs Minimax（深度 5）
-    python -m chinese_chess.main gui --red human --black minimax --black-depth 5
+    python -m app.main gui --red human --black minimax --black-depth 5
 
     # CLI 模式：MCTS vs Minimax
-    python -m chinese_chess.main cli --red mcts --black minimax
+    python -m app.main cli --red mcts --black minimax
 
     # MCTS-Minimax 引擎
-    python -m chinese_chess.main cli --red mcts_minimax --black minimax --red-sims 3000
+    python -m app.main cli --red mcts_minimax --black minimax --red-sims 3000
 
 支持的玩家类型：
     - ``human``: 人类玩家（CLI 手动输入 / GUI 鼠标点击）
@@ -25,14 +25,8 @@
 旧拼写（如 ``hybrid``、``mcts_minmax``）在解析时仍会规范为 ``mcts_minimax``。
 """
 
-import sys
-import os
 import argparse
 from typing import Optional
-
-# 确保仓库根目录在导入路径中，使 `import chinese_chess...` 在
-# 用户从仓库根目录执行 `python chinese_chess/main.py` 时也能正常工作。
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 _AI_KIND_ALLOWED = frozenset({"human", "minimax", "random", "mcts", "mcts_minimax"})
 
@@ -92,11 +86,11 @@ if __name__ == "__main__":
     if black_k not in _AI_KIND_ALLOWED:
         parser.error(f"未知的 --black: {args.black!r}（允许: {sorted(_AI_KIND_ALLOWED)}）")
 
-    from chinese_chess.control.controller import GameController, format_matchup_line
-    from chinese_chess.algorithm.random_ai import RandomAI
-    from chinese_chess.algorithm.minimax import MinimaxAI
-    from chinese_chess.algorithm.mcts import MCTSAI
-    from chinese_chess.algorithm.mcts_minimax import MCTSMinimaxAI
+    from app.controller import GameController, format_matchup_line
+    from ai.random_ai import RandomAI
+    from ai.minimax_ai import MinimaxAI
+    from ai.mcts_ai import MCTSAI
+    from ai.mcts_minimax_ai import MCTSMinimaxAI
 
     def _default_sims(kind: str, sims: Optional[int]) -> int:
         if sims is not None:
@@ -152,13 +146,13 @@ if __name__ == "__main__":
                 file=sys.stderr,
             )
             sys.exit(1)
-        from chinese_chess.view.qt.main_window import MainWindow
+        from ui.qt.main_window import MainWindow
 
         app = QApplication(sys.argv)
         window = MainWindow(controller=controller)
         window.show()
         sys.exit(app.exec_())
     else:
-        from chinese_chess.smoke_play import main as smoke_main
+        from app.smoke_play import main as smoke_main
 
         smoke_main(controller)

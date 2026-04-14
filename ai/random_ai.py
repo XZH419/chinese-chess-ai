@@ -16,7 +16,7 @@ from __future__ import annotations
 import random
 from typing import Optional, Tuple
 
-from chinese_chess.model.rules import Rules
+from engine.rules import Rules
 
 
 class RandomAI:

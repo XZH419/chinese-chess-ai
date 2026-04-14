@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Iterator, List, NamedTuple, Optional, Tuple
 
-from .board import Board
+from engine.board import Board
 
 
 class MoveEntry(NamedTuple):

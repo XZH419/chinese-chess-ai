@@ -52,8 +52,8 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from chinese_chess.model.board import Board
-from chinese_chess.model.rules import MoveEntry, Rules
+from engine.board import Board
+from engine.rules import MoveEntry, Rules
 
 
 class Evaluation:

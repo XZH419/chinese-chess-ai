@@ -9,8 +9,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Any, Callable, Optional, Tuple
 
-from chinese_chess.model.board import Board
-from chinese_chess.model.rules import Rules
+from engine.board import Board
+from engine.rules import Rules
 
 # 与三处搜索器一致的走法四元组
 Move4 = Tuple[int, int, int, int]
