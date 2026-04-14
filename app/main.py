@@ -26,9 +26,21 @@
 """
 
 import argparse
+import sys
 from typing import Optional
 
-_AI_KIND_ALLOWED = frozenset({"human", "minimax", "random", "mcts", "mcts_minimax"})
+_AI_KIND_ALLOWED = frozenset(
+    {
+        "human",
+        "minimax",
+        "minimax_ai",
+        "random",
+        "mcts",
+        "mcts_ai",
+        "mcts_minimax",
+        "mcts_minimax_ai",
+    }
+)
 
 # 已废弃的 CLI 写法 → 统一为 mcts_minimax（不改变算法，仅规范化）
 _LEGACY_AI_TO_MCTS_MINIMAX = frozenset({"hybrid", "mcts_minmax"})
@@ -38,6 +50,12 @@ def _normalize_ai_kind(kind: str) -> str:
     """将 CLI 字符串规范为内部引擎键 ``mcts_minimax`` 等。"""
     k = kind.strip().lower().replace("-", "_")
     if k in _LEGACY_AI_TO_MCTS_MINIMAX:
+        return "mcts_minimax"
+    if k == "minimax_ai":
+        return "minimax"
+    if k == "mcts_ai":
+        return "mcts"
+    if k == "mcts_minimax_ai":
         return "mcts_minimax"
     return k
 
@@ -51,14 +69,14 @@ if __name__ == "__main__":
         type=str,
         default="human",
         metavar="KIND",
-        help="红方：human（玩家）|minimax|random|mcts|mcts_minimax",
+        help="红方：human（玩家）|minimax|minimax_ai|random|mcts|mcts_ai|mcts_minimax|mcts_minimax_ai",
     )
     parser.add_argument(
         "--black",
         type=str,
         default="minimax",
         metavar="KIND",
-        help="黑方：human（玩家）|minimax|random|mcts|mcts_minimax",
+        help="黑方：human（玩家）|minimax|minimax_ai|random|mcts|mcts_ai|mcts_minimax|mcts_minimax_ai",
     )
     parser.add_argument("--red-depth", type=int, default=5, help="红方为 Minimax 时的搜索深度（默认 5）")
     parser.add_argument("--black-depth", type=int, default=5, help="黑方为 Minimax 时的搜索深度（默认 5）")
