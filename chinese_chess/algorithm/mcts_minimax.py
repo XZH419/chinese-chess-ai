@@ -66,6 +66,8 @@ from .mcts import (
     _POLICY_HVCAP_VALUE,
     _ROOT_BIAS_SCALE,
     _ROOT_VISITS_TIE_FRAC,
+    _SELECTION_MAX_PLIES,
+    _parallel_workers_when_safe,
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -1093,7 +1095,11 @@ def _run_single_mcts_minimax_tree(
         path: List[MCTSMinimaxNode] = [root]
 
         # ── Selection ──
+        _sel_guard = 0
         while node.is_fully_expanded() and node.children:
+            _sel_guard += 1
+            if _sel_guard > _SELECTION_MAX_PLIES:
+                break
             log_n = math.log(node.visits) if node.visits > 0 else 0.0
             edge_move, next_node = node.best_child_ucb(log_n)
             mover_sel = board.current_player
@@ -1246,7 +1252,7 @@ class MCTSMinimaxAI:
                 self.last_stats = {
                     "time_taken": 0.0,
                     "simulations": 0,
-                    "workers": self.workers,
+                    "workers": _parallel_workers_when_safe(self.workers),
                     "win_rate": "开局库",
                     "opening_book": True,
                 }
@@ -1259,7 +1265,7 @@ class MCTSMinimaxAI:
         ms = max_simulations if max_simulations is not None else self.max_simulations
         t0 = time.time()
 
-        effective_workers = self.workers
+        effective_workers = _parallel_workers_when_safe(self.workers)
         if effective_workers <= 1 or ms < effective_workers * 10:
             child_stats, probe_stats = _run_single_mcts_minimax_tree(
                 board, ms, tl, seed_offset=0, root_move_history=root_mh,

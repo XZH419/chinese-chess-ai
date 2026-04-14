@@ -39,6 +39,7 @@ import concurrent.futures
 import math
 import multiprocessing
 import random
+import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -72,6 +73,26 @@ _ROLL_PREFER_AGGRESSIVE = 0.50  # 更常选过河/压境类推进
 # 根 tie-break：_policy_attack_bias 内对将军 / 攻击性推进的加分上限分量
 _POLICY_BIAS_CHECK_COMPONENT = 0.42
 _POLICY_BIAS_AGGRESSIVE_PUSH_COMPONENT = 0.16
+
+# 选择阶段沿 DAG 下降的最大步数（防止局面环 + 全展开节点导致死循环）
+_SELECTION_MAX_PLIES = 512
+
+
+def _parallel_workers_when_safe(requested: int) -> int:
+    """在非主线程（如 PyQt AI 后台线程）中禁用多进程根并行。
+
+    Windows 上于子线程创建 ``ProcessPoolExecutor`` 常与 spawn 导入链死锁，
+    表现为 MCTS 长时间无响应。主线程（CLI / benchmark）仍可使用多进程。
+    """
+    if requested <= 1:
+        return requested
+    try:
+        if threading.current_thread() is not threading.main_thread():
+            return 1
+    except Exception:
+        pass
+    return requested
+
 
 # 走法四元组：(起始行, 起始列, 目标行, 目标列)
 Move4 = Tuple[int, int, int, int]
@@ -427,7 +448,11 @@ def _run_single_mcts_tree(
         # ── 选择 (Selection) ──
         # 从根节点开始，沿 UCB1-RAVE 最优路径一直向下，
         # 直到遇到一个未完全展开的节点（还有 untried_moves）或终局节点。
+        _sel_guard = 0
         while node.is_fully_expanded() and node.children:
+            _sel_guard += 1
+            if _sel_guard > _SELECTION_MAX_PLIES:
+                break
             log_n = math.log(node.visits) if node.visits > 0 else 0.0
             # 从边（字典键）读取走法，而非子节点属性——DAG 安全
             edge_move, next_node = node.best_child_ucb(log_n)
@@ -972,7 +997,7 @@ class MCTSAI:
                 self.last_stats = {
                     "time_taken": 0.0,
                     "simulations": 0,
-                    "workers": self.workers,
+                    "workers": _parallel_workers_when_safe(self.workers),
                     "win_rate": "开局库",
                     "opening_book": True,
                 }
@@ -985,7 +1010,7 @@ class MCTSAI:
         ms = max_simulations if max_simulations is not None else self.max_simulations
         t0 = time.time()
 
-        effective_workers = self.workers
+        effective_workers = _parallel_workers_when_safe(self.workers)
         # 模拟次数太少时，进程启动开销大于收益，退化为单进程
         if effective_workers <= 1 or ms < effective_workers * 10:
             merged = _run_single_mcts_tree(
