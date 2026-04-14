@@ -63,12 +63,15 @@ _RAVE_CONST = 300       # RAVE 等效常数 k：β = rave_visits / (rave_visits 
 
 # ── Policy 层进攻偏置（不调用 Evaluation.evaluate，不重算静态分值）──
 _POLICY_HVCAP_VALUE = 300   # 高价值吃子阈值（马/炮/车，沿用 MG 子力刻度）
-_ROOT_BIAS_SCALE = 55.0     # 根决策 tie-break：bias 权重（相对 visits×1e6+wins×1e3 很小）
-_ROOT_VISITS_TIE_FRAC = 0.88  # 与最高 visits 的比 ≥ 此值才吃满 attack bias
-_ROLL_PREFER_CHECK = 0.52
-_ROLL_PREFER_HVCAP = 0.55
-_ROLL_PREFER_ANY_CAPTURE = 0.70
-_ROLL_PREFER_AGGRESSIVE = 0.36
+_ROOT_BIAS_SCALE = 72.0     # 根决策 tie-break：略提高，更倾向吃子/将军类根着法
+_ROOT_VISITS_TIE_FRAC = 0.84  # 略放宽，使更多近 visit 根子吃满 attack bias
+_ROLL_PREFER_CHECK = 0.64     # rollout 更常优先选将军着法
+_ROLL_PREFER_HVCAP = 0.66     # 更常优先高价值吃子
+_ROLL_PREFER_ANY_CAPTURE = 0.80
+_ROLL_PREFER_AGGRESSIVE = 0.50  # 更常选过河/压境类推进
+# 根 tie-break：_policy_attack_bias 内对将军 / 攻击性推进的加分上限分量
+_POLICY_BIAS_CHECK_COMPONENT = 0.42
+_POLICY_BIAS_AGGRESSIVE_PUSH_COMPONENT = 0.16
 
 # 走法四元组：(起始行, 起始列, 目标行, 目标列)
 Move4 = Tuple[int, int, int, int]
@@ -145,9 +148,9 @@ def _policy_attack_bias(
         bias += min(1.0, float(pv.get(victim.piece_type, 0)) / 900.0)
     if victim is None or victim.piece_type != "jiang":
         if _move_gives_check(board, m, mover, gives_check_cache):
-            bias += 0.35
+            bias += _POLICY_BIAS_CHECK_COMPONENT
     if _is_aggressive_push(board, mover, m, b):
-        bias += 0.12
+        bias += _POLICY_BIAS_AGGRESSIVE_PUSH_COMPONENT
     return bias
 
 
