@@ -130,12 +130,12 @@ def _simulate(board: Board, root_player: str) -> float:
 
 def _run_single_mcts_tree(board: Board, max_sims: int, tl: float, seed: int = 0) -> Dict:
     random.seed(time.time_ns() + seed)
-    t0, root_board = time.time(), board
+    t0, root_board = time.perf_counter(), board
     root = MCTSNode(board.zobrist_hash, "black" if board.current_player == "red" else "red")
     tt, mcts_cache = {root.state_hash: root}, {}
     
     for _ in range(max_sims):
-        if time.time() - t0 >= tl: break
+        if time.perf_counter() - t0 >= tl: break
         
         # 1. Selection & 2. Expansion
         sim_board, node, path = root_board.copy(), root, [root]
@@ -200,7 +200,7 @@ class MCTSAI:
 
         # 2. 搜索
         tl = self.time_limit if time_limit is None else float(time_limit)
-        t0 = time.time()
+        t0 = time.perf_counter()
         merged = _run_single_mcts_tree(board, self.max_simulations, tl)
 
         # 3. 决策：综合 Visits 和 战术偏置
@@ -214,7 +214,7 @@ class MCTSAI:
             score = st["v"] + bias * _ROOT_BIAS_SCALE * (st["v"] / (v_max + 1e-6))
             if score > max_score: max_score, best_move = score, m
 
-        elapsed = time.time() - t0
+        elapsed = time.perf_counter() - t0
         sims_done = int(sum(s.get("v", 0) for s in merged.values()))
         # 提供给 GUI/AI worker 的统计信息（ui/qt/main_window.py 会读取 simulations/time_taken）
         self.last_stats = {
