@@ -49,6 +49,10 @@ MAX_PLIES_PER_GAME = 200  # 超过则判 Draw，防止死循环
 # 绕过开局库：三种 AI 都在 len(game_history) < 30 时才探测开局库
 OPENING_BOOK_BYPASS_HISTORY: List[int] = [-(i + 1) for i in range(30)]
 
+def _log(msg: str) -> None:
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}")
+
 
 @contextlib.contextmanager
 def _silence_output() -> List[str]:
@@ -65,17 +69,6 @@ def _silence_output() -> List[str]:
             yield []
     finally:
         builtins.print = old_print  # type: ignore[assignment]
-
-
-def _safe_workers(requested: int) -> int:
-    """在当前机器上取一个合理的 workers 上限。"""
-    try:
-        import multiprocessing
-
-        cpu = multiprocessing.cpu_count()
-        return max(1, min(int(requested), cpu))
-    except Exception:
-        return max(1, int(requested))
 
 
 def _agent_name(agent: Any) -> str:
@@ -215,6 +208,10 @@ def run_single_game(
 ) -> GameResult:
     """运行一局对弈，返回逐局统计。"""
 
+    _log(
+        f"[对局开始] {experiment} | game={game_index} | start={start_kind} | "
+        f"red={_agent_name(red_agent)} vs black={_agent_name(black_agent)}"
+    )
     board = Board() if start_kind == "initial" else build_midgame_board(plies=start_midgame_plies)
     history: List[MoveEntry] = [MoveEntry(pos_hash=board.zobrist_hash)]
     # 确保开局库永远不触发：先填充 30 个占位，再追加真实哈希
@@ -230,7 +227,7 @@ def run_single_game(
             if Rules.is_game_over(board, move_history=history):
                 w = Rules.winner(board, move_history=history)
                 winner = w if w is not None else "draw"
-                return GameResult(
+                res = GameResult(
                     experiment=experiment,
                     game_index=game_index,
                     red_ai=_agent_name(red_agent),
@@ -244,6 +241,12 @@ def run_single_game(
                     material_diff=_material_diff(board),
                     start_kind=start_kind,
                 )
+                _log(
+                    f"[对局结束] {experiment} | game={game_index} | winner={res.winner} | plies={res.plies} | "
+                    f"red_avg={res.red_avg_time_s:.3f}s black_avg={res.black_avg_time_s:.3f}s | "
+                    f"material_diff={res.material_diff}"
+                )
+                return res
 
             side = board.current_player
             agent = red_agent if side == "red" else black_agent
@@ -272,7 +275,7 @@ def run_single_game(
                 # 无合法着法：胜负由规则判定；若仍未判定则归为 draw
                 w = Rules.winner(board, move_history=history)
                 winner = w if w is not None else "draw"
-                return GameResult(
+                res = GameResult(
                     experiment=experiment,
                     game_index=game_index,
                     red_ai=_agent_name(red_agent),
@@ -286,6 +289,12 @@ def run_single_game(
                     material_diff=_material_diff(board),
                     start_kind=start_kind,
                 )
+                _log(
+                    f"[对局结束] {experiment} | game={game_index} | winner={res.winner} | plies={res.plies} | "
+                    f"red_avg={res.red_avg_time_s:.3f}s black_avg={res.black_avg_time_s:.3f}s | "
+                    f"material_diff={res.material_diff}"
+                )
+                return res
 
             sr, sc, er, ec = move
             ok, reason = Rules.is_valid_move(
@@ -303,7 +312,7 @@ def run_single_game(
                 if not legal:
                     w = Rules.winner(board, move_history=history)
                     winner = w if w is not None else "draw"
-                    return GameResult(
+                    res = GameResult(
                         experiment=experiment,
                         game_index=game_index,
                         red_ai=_agent_name(red_agent),
@@ -318,6 +327,11 @@ def run_single_game(
                         error=f"illegal_move_from_{_agent_name(agent)}: {move} ({reason})",
                         start_kind=start_kind,
                     )
+                    _log(
+                        f"[对局结束] {experiment} | game={game_index} | winner={res.winner} | plies={res.plies} | "
+                        f"ERROR={res.error}"
+                    )
+                    return res
                 move = legal[0]
 
             mover = board.current_player
@@ -326,7 +340,7 @@ def run_single_game(
             game_hash_history.append(board.zobrist_hash)
 
         # 超过最大步数，强制和棋
-        return GameResult(
+        res = GameResult(
             experiment=experiment,
             game_index=game_index,
             red_ai=_agent_name(red_agent),
@@ -340,8 +354,14 @@ def run_single_game(
             material_diff=_material_diff(board),
             start_kind=start_kind,
         )
+        _log(
+            f"[对局结束] {experiment} | game={game_index} | winner=draw(max_plies) | plies={res.plies} | "
+            f"red_avg={res.red_avg_time_s:.3f}s black_avg={res.black_avg_time_s:.3f}s | "
+            f"material_diff={res.material_diff}"
+        )
+        return res
     except Exception as e:
-        return GameResult(
+        res = GameResult(
             experiment=experiment,
             game_index=game_index,
             red_ai=_agent_name(red_agent),
@@ -356,6 +376,10 @@ def run_single_game(
             error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
             start_kind=start_kind,
         )
+        _log(
+            f"[对局结束] {experiment} | game={game_index} | winner=error | plies={res.plies} | ERROR={type(e).__name__}: {e}"
+        )
+        return res
 
 
 def run_match(
@@ -370,6 +394,7 @@ def run_match(
 ) -> List[GameResult]:
     """批量对局并自动换先（每局交换红黑）。"""
 
+    _log(f"[实验开始] {experiment} | rounds={rounds} | start={start_kind}")
     results: List[GameResult] = []
     for i in range(rounds):
         # 第 1 局：A 红 B 黑；第 2 局：B 红 A 黑；以此类推
@@ -392,6 +417,10 @@ def run_match(
         # 释放跨局对象（并行/board.copy() 会产生不少短命对象）
         gc.collect()
 
+    wins = {"red": 0, "black": 0, "draw": 0, "error": 0}
+    for r in results:
+        wins[r.winner] = wins.get(r.winner, 0) + 1
+    _log(f"[实验结束] {experiment} | results={wins}")
     return results
 
 
@@ -489,6 +518,7 @@ def main() -> None:
     parser.add_argument("--out", type=str, default="", help="输出目录（默认 runs/<timestamp>/）")
     args = parser.parse_args()
 
+    t_global0 = time.perf_counter()
     # 关闭并行 worker 的观测日志（如需观察可手动 export CHESSAI_PARALLEL_LOG=1）
     os.environ.pop("CHESSAI_PARALLEL_LOG", None)
 
@@ -514,6 +544,13 @@ def main() -> None:
     # 让 MCTS 用 Minimax 的真实中位数做 time_limit；Minimax 固定深度，不传 time_limit
     mcts_time_limit_s = mm_median
 
+    _log(
+        "[实验总览] "
+        f"rounds={rounds} | minimax_depth={mm_depth} | calib_samples={int(args.calib_samples)} | "
+        f"calib_median={mm_median:.3f}s | start={start_kind} | midgame_plies={midgame_plies} | "
+        f"max_plies={MAX_PLIES_PER_GAME} | seed={int(args.seed)} | out={out_dir}"
+    )
+
     # ── 实验设计（当前项目适配版） ──
     # E1: 随机基线（验证规则/runner 稳定）
     # E2: Minimax vs Random（检验确定性搜索基本有效性）
@@ -521,7 +558,6 @@ def main() -> None:
     # E4: Minimax vs MCTS（核心对比：同一 time_limit 下的强度）
     #
     # 所有实验均使用同一 per-move time_limit 以保证公平；MCTS 设置一个“足够高”的 max_simulations 作为兜底。
-    workers = _safe_workers(8)
     mcts_max_sims = 200000  # 主要由 time_limit 控制；上限只用于防止极端情况下过早耗尽
 
     results: List[GameResult] = []
@@ -551,7 +587,6 @@ def main() -> None:
     e3a = MCTSAI(
         max_simulations=mcts_max_sims,
         time_limit=mcts_time_limit_s,
-        workers=workers,
         verbose=False,
     )
     e3b = RandomAI()
@@ -559,7 +594,7 @@ def main() -> None:
         e3a,
         e3b,
         rounds=rounds,
-        experiment=f"E3: MCTSAI(workers={workers}) vs RandomAI | tl={mcts_time_limit_s:.3f}s | start={start_kind}",
+        experiment=f"E3: MCTSAI vs RandomAI | tl={mcts_time_limit_s:.3f}s | start={start_kind}",
         time_limit_s=mcts_time_limit_s,
         start_kind=start_kind,
         start_midgame_plies=midgame_plies,
@@ -569,14 +604,13 @@ def main() -> None:
     e4b = MCTSAI(
         max_simulations=mcts_max_sims,
         time_limit=mcts_time_limit_s,
-        workers=workers,
         verbose=False,
     )
     results += run_match(
         e4a,
         e4b,
         rounds=rounds,
-        experiment=f"E4: MinimaxAI(depth={mm_depth}) vs MCTSAI(workers={workers}) | tl={mcts_time_limit_s:.3f}s | start={start_kind}",
+        experiment=f"E4: MinimaxAI(depth={mm_depth}) vs MCTSAI | tl={mcts_time_limit_s:.3f}s | start={start_kind}",
         time_limit_s=None,
         start_kind=start_kind,
         start_midgame_plies=midgame_plies,
@@ -587,8 +621,9 @@ def main() -> None:
     _write_raw_csv(out_csv, results)
     out_txt.write_text(_summarize(results), encoding="utf-8")
 
-    print(f"Wrote {out_csv}")
-    print(f"Wrote {out_txt}")
+    _log(f"[写入完成] {out_csv}")
+    _log(f"[写入完成] {out_txt}")
+    _log(f"[实验结束] elapsed={time.perf_counter() - t_global0:.1f}s")
 
 
 if __name__ == "__main__":

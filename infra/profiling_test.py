@@ -60,15 +60,6 @@ def _silence_output() -> Iterable[None]:
         builtins.print = old_print  # type: ignore[assignment]
 
 
-def _cpu_workers_max() -> int:
-    try:
-        import multiprocessing
-
-        return max(1, min(8, multiprocessing.cpu_count()))
-    except Exception:
-        return 1
-
-
 # ──────────────────────────────────────────────────────────────
 #  2) 固定中局局面构造（避免开局库干扰）
 # ──────────────────────────────────────────────────────────────
@@ -173,10 +164,9 @@ def _measure_minimax(depth: int, board: Board) -> Tuple[float, float]:
 def _measure_mcts_like(
     *,
     cls_name: str,
-    make_ai: Callable[[int], Any],
+    make_ai: Callable[[], Any],
     board: Board,
     simulations: int,
-    workers: int,
 ) -> Tuple[float, float]:
     """返回 (median_seconds, median_sims_per_sec)。"""
 
@@ -184,7 +174,7 @@ def _measure_mcts_like(
     gh = list(OPENING_BOOK_BYPASS_HISTORY) + [board.zobrist_hash]
 
     def _run_once() -> Tuple[float, Optional[float]]:
-        ai = make_ai(workers)
+        ai = make_ai()
         with _silence_output():
             t0 = time.perf_counter()
             ai.get_best_move(
@@ -201,7 +191,7 @@ def _measure_mcts_like(
     # warm-up（不计时）
     with _silence_output():
         _run_warmup(
-            lambda: make_ai(workers).get_best_move(
+            lambda: make_ai().get_best_move(
                 board.copy(),
                 time_limit=0.2,
                 game_history=gh,
@@ -247,8 +237,6 @@ def main() -> None:
     os.environ.pop("CHESSAI_PARALLEL_LOG", None)
 
     board = build_midgame_board(plies=18)
-    wmax = _cpu_workers_max()
-
     rows: List[Dict[str, Any]] = []
 
     # Minimax：D in {3,4,5}（你也可以按需扩展）
@@ -266,39 +254,28 @@ def main() -> None:
             }
         )
 
-    # MCTS：同 simulations=1600，workers=1 vs workers=max
+    # MCTS：单线程定标（当前实现不再支持 workers 并行）
     sims = 1600
 
-    def _mk_mcts(workers: int) -> MCTSAI:
-        return MCTSAI(max_simulations=sims, time_limit=999.0, workers=workers, verbose=False)
+    def _mk_mcts() -> MCTSAI:
+        return MCTSAI(max_simulations=sims, time_limit=999.0, verbose=False)
 
-    for workers in (1, wmax):
-        t_med, sps = _measure_mcts_like(
-            cls_name="MCTSAI",
-            make_ai=_mk_mcts,
-            board=board,
-            simulations=sims,
-            workers=workers,
-        )
-        rows.append(
-            {
-                "AI": "MCTSAI",
-                "Config": f"sims={sims}, workers={workers}",
-                "Median time (s)": _fmt_float(t_med),
-                "Throughput": f"{int(sps):,} sims/s",
-            }
-        )
+    t_med, sps = _measure_mcts_like(
+        cls_name="MCTSAI",
+        make_ai=_mk_mcts,
+        board=board,
+        simulations=sims,
+    )
+    rows.append(
+        {
+            "AI": "MCTSAI",
+            "Config": f"sims={sims}",
+            "Median time (s)": _fmt_float(t_med),
+            "Throughput": f"{int(sps):,} sims/s",
+        }
+    )
 
-    mcts_sps_workers1: Optional[float] = None
-    mcts_time_workers1: Optional[float] = None
-
-    # 取回 MCTS workers=1 数据用于开销分析（从 rows 中解析最简单）
-    for r in rows:
-        if r["AI"] == "MCTSAI" and r["Config"] == f"sims={sims}, workers=1":
-            mcts_time_workers1 = float(r["Median time (s)"])
-            # Throughput: "{int(sps):,} sims/s"
-            mcts_sps_workers1 = float(r["Throughput"].split()[0].replace(",", ""))
-            break
+    # 仅保留 MCTS 单线程行，直接复用吞吐解析即可
 
     # 输出 Markdown 表格（仅脚本末尾输出）
     headers = ["AI", "Config", "Median time (s)", "Throughput"]
@@ -316,14 +293,14 @@ def main() -> None:
     print(f"- **建议对弈 time_limit**：每步 `time_limit={budget_s:.2f}s`（公平对比用）")
     print(f"- **建议 MinimaxAI 深度**：`depth={suggested_depth}`（接近中局单步耗时基准）")
 
-    mcts_sps_max = None
+    mcts_sps = None
     for r in rows:
-        if r["AI"] == "MCTSAI" and r["Config"] == f"sims={sims}, workers={wmax}":
-            mcts_sps_max = float(r["Throughput"].split()[0].replace(",", ""))
-    if mcts_sps_max is not None:
-        rec = _suggest_simulations(mcts_sps_max, budget_s, safety=1.8)
+        if r["AI"] == "MCTSAI" and r["Config"] == f"sims={sims}":
+            mcts_sps = float(r["Throughput"].split()[0].replace(",", ""))
+    if mcts_sps is not None:
+        rec = _suggest_simulations(mcts_sps, budget_s, safety=1.8)
         print(
-            f"- **建议 MCTSAI 上限模拟次数**：`max_simulations≈{rec:d}`（workers={wmax}，主要由 time_limit 控制，sims 仅防极端情况）"
+            f"- **建议 MCTSAI 上限模拟次数**：`max_simulations≈{rec:d}`（主要由 time_limit 控制，sims 仅防极端情况）"
         )
 
 

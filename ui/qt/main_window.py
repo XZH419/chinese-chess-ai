@@ -10,9 +10,8 @@
     - ``MainWindow``: 主窗口，管理"配置 → 开始 → 对局 → 结束"的完整生命周期。
 
 **搜索架构**：``get_best_move`` / ``choose_move`` 在单独的 ``multiprocessing.Process``
-中执行（见 ``infra.ai_worker``），避免在 ``QThread`` 内嵌套
-``ProcessPoolExecutor`` 导致 Windows 上卡死；MCTS / MCTS-Minimax 可在子进程内
-使用多进程 worker（子进程主线程调用搜索，``_parallel_workers_when_safe`` 不再被误降为 1）。
+中执行（见 ``infra.ai_worker``），避免在 ``QThread`` 内嵌套高负载计算导致界面卡顿，
+并规避 Windows 下多进程/线程池组合带来的稳定性问题。
 """
 
 from __future__ import annotations
@@ -832,8 +831,7 @@ class MainWindow(QMainWindow):
             return f"{base} · 深度 {d}" if isinstance(d, int) else base
         if key == "mcts":
             s = getattr(agent, "max_simulations", None)
-            w = getattr(agent, "workers", 1)
-            return f"{base} · 模拟上限 {s} · 并行进程 {w}" if s is not None else base
+            return f"{base} · 模拟上限 {s}" if s is not None else base
         return base
 
     def _gui_matchup_line(self) -> str:
@@ -1244,8 +1242,7 @@ class MainWindow(QMainWindow):
         """将 MCTS 搜索统计信息格式化后写入日志。
 
         Args:
-            stats: 包含 ``time_taken``, ``simulations``, ``workers``,
-                ``win_rate`` 等键的统计字典。
+            stats: 包含 ``time_taken``, ``simulations``, ``win_rate`` 等键的统计字典。
         """
         time_taken = stats.get("time_taken", 0)
         time_str = (
@@ -1253,7 +1250,6 @@ class MainWindow(QMainWindow):
         )
         self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — 搜索耗时（秒）: {time_str}")
         self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — 模拟次数: {stats.get('simulations', 0)}")
-        self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — 并行进程数: {stats.get('workers', 1)}")
         win_rate = stats.get("win_rate", "")
         if win_rate:
             self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — 估计胜率: {win_rate}")

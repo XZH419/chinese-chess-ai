@@ -3,14 +3,10 @@
 """
 
 from __future__ import annotations
-import concurrent.futures
 import math
-import multiprocessing
-import os
 import random
-import threading
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from engine.board import Board
 from engine.rules import MoveEntry, Rules
@@ -33,11 +29,6 @@ _FPU_PRIOR_SCALE = 0.20
 _SELECTION_MAX_PLIES = 512
 
 Move4 = Tuple[int, int, int, int]
-
-def _parallel_workers_when_safe(requested: int) -> int:
-    if requested <= 1: return requested
-    if threading.current_thread() is not threading.main_thread(): return 1
-    return requested
 
 # ═══════════════════════════════════════════════════════════════
 #  启发式辅助函数（合并与精简）
@@ -183,11 +174,10 @@ def _run_single_mcts_tree(board: Board, max_sims: int, tl: float, seed: int = 0)
 # ═══════════════════════════════════════════════════════════════
 
 class MCTSAI:
-    def __init__(self, max_simulations: int = 5000, time_limit: float = 10.0, workers: int = None, verbose: bool = True):
+    def __init__(self, max_simulations: int = 5000, time_limit: float = 10.0, verbose: bool = True):
         self.max_simulations = max_simulations
         self.time_limit = time_limit
         self.verbose = verbose
-        self.workers = workers or min(8, multiprocessing.cpu_count())
         self.last_stats: Optional[Dict[str, Any]] = None
 
     def get_best_move(
@@ -205,43 +195,13 @@ class MCTSAI:
                     "opening_book": True,
                     "time_taken": 0.0,
                     "time_limit": time_limit,
-                    "workers": 1,
                 }
                 return res
 
         # 2. 搜索
         tl = self.time_limit if time_limit is None else float(time_limit)
-        workers = _parallel_workers_when_safe(self.workers)
         t0 = time.time()
-        if workers <= 1:
-            merged = _run_single_mcts_tree(board, self.max_simulations, tl)
-        else:
-            # Windows 下子进程并行（spawn + pickle + 递归导入）在 GUI/交互环境里更容易“卡死”；
-            # 这里优先使用线程池保证对局流程可终止，并给所有 future 加硬超时保护。
-            Executor = (
-                concurrent.futures.ThreadPoolExecutor
-                if os.name == "nt"
-                else concurrent.futures.ProcessPoolExecutor
-            )
-            try:
-                with Executor(max_workers=workers) as pool:
-                    sims = max(1, self.max_simulations // workers)
-                    tasks = [
-                        pool.submit(_run_single_mcts_tree, board.copy(), sims, tl, i * 100)
-                        for i in range(workers)
-                    ]
-                    # 允许少量调度/回收开销，避免 future 永久阻塞
-                    hard_timeout = max(0.1, tl + 1.5)
-                    results = [t.result(timeout=hard_timeout) for t in tasks]
-            except Exception:
-                # 并行失败时立即降级为单线程，保证不会把对局“挂死”
-                merged = _run_single_mcts_tree(board, self.max_simulations, tl)
-            else:
-                merged = {}
-                for r in results:
-                    for m, st in r.items():
-                        if m not in merged: merged[m] = {"v": 0, "w": 0}
-                        merged[m]["v"] += st["v"]; merged[m]["w"] += st["w"]
+        merged = _run_single_mcts_tree(board, self.max_simulations, tl)
 
         # 3. 决策：综合 Visits 和 战术偏置
         v_max = max((s["v"] for s in merged.values()), default=0)
@@ -256,12 +216,11 @@ class MCTSAI:
 
         elapsed = time.time() - t0
         sims_done = int(sum(s.get("v", 0) for s in merged.values()))
-        # 提供给 GUI/AI worker 的统计信息（ui/qt/main_window.py 会读取 simulations/time_taken/workers）
+        # 提供给 GUI/AI worker 的统计信息（ui/qt/main_window.py 会读取 simulations/time_taken）
         self.last_stats = {
             "time_taken": float(elapsed),
             "time_limit": float(tl),
             "simulations": sims_done,
-            "workers": int(workers),
         }
         if sims_done > 0:
             # 简单胜率估计：以访问最多的根走法的均值作为展示
