@@ -4,22 +4,36 @@
 玩家交互、AI 后台计算以及对局配置面板等功能。
 
 核心组件：
-    - ``AIMoveThread``: AI 走法计算的后台线程，避免阻塞 UI。
+    - ``AIMoveThread``: 轻量后台线程，仅负责与 **独立 AI 子进程** 通信（不直接搜索）。
     - ``PixmapPieceItem``: 可动画的棋子图元，支持平滑移动效果。
     - ``XiangqiBoardView``: 棋盘视图，负责渲染和鼠标交互坐标转换。
     - ``MainWindow``: 主窗口，管理"配置 → 开始 → 对局 → 结束"的完整生命周期。
+
+**搜索架构**：``get_best_move`` / ``choose_move`` 在单独的 ``multiprocessing.Process``
+中执行（见 ``chinese_chess.scripts.ai_worker``），避免在 ``QThread`` 内嵌套
+``ProcessPoolExecutor`` 导致 Windows 上卡死；MCTS / MCTS-Minimax 可在子进程内
+使用多进程 worker（子进程主线程调用搜索，``_parallel_workers_when_safe`` 不再被误降为 1）。
 """
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 from datetime import datetime
+from queue import Empty
 from typing import Dict, Optional, Tuple
 
 import traceback
 
-from PyQt5.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon, QPainter, QPixmap, QTextCursor
+from PyQt5.QtCore import (
+    QEasingCurve,
+    QPointF,
+    QPropertyAnimation,
+    QRectF,
+    QThread,
+    pyqtSignal,
+)
+from PyQt5.QtGui import QCloseEvent, QFont, QIcon, QPainter, QPixmap, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
@@ -39,12 +53,18 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from chinese_chess.algorithm.ai_state_codec import (
+    build_ai_config_dict,
+    serialize_board,
+    serialize_move_history,
+)
 from chinese_chess.algorithm.minimax import MinimaxAI
 from chinese_chess.algorithm.mcts import MCTSAI
 from chinese_chess.algorithm.mcts_minimax import MCTSMinimaxAI
 from chinese_chess.algorithm.random_ai import RandomAI
 from chinese_chess.control.controller import GameController, MoveOutcome
 from chinese_chess.model.rules import Rules
+from chinese_chess.scripts.ai_worker import ai_worker_main, drain_queue, shutdown_worker
 
 
 Move = Tuple[int, int, int, int]
@@ -119,10 +139,10 @@ def _piece_code(color: str, piece_type: str) -> str:
 
 
 class AIMoveThread(QThread):
-    """AI 走法计算后台线程。
+    """与独立 AI 子进程通信的后台线程（不在本线程内调用 ``get_best_move``）。
 
-    在独立线程中执行 AI 搜索计算，避免阻塞 GUI 主线程。
-    计算完成后通过 ``move_ready`` 信号将结果回传给主线程。
+    将序列化后的搜索请求写入 ``request_queue``，从 ``response_queue`` 阻塞读取结果。
+    实际 Random / Minimax / MCTS / MCTS-Minimax 均在子进程内执行。
 
     Signals:
         move_ready: 计算完成时发射，携带参数 ``(走法|None, 统计信息字典|None, 运行ID)``。
@@ -132,65 +152,65 @@ class AIMoveThread(QThread):
 
     def __init__(
         self,
-        ai,
-        board_snapshot,
-        ai_color: str,
-        time_limit_s: int,
+        request_queue: multiprocessing.Queue,
+        response_queue: multiprocessing.Queue,
+        request_payload: dict,
         run_id: int,
-        game_history_hashes: Optional[list] = None,
-        move_history: Optional[list] = None,
+        worker_process: multiprocessing.Process,
     ):
-        """初始化 AI 计算线程。
-
-        线程内部仅持有棋盘快照和 AI 实例等纯数据对象，
-        绝不持有任何 UI / Controller 引用，避免跨线程资源竞争。
+        """初始化 AI 通信线程。
 
         Args:
-            ai: AI 代理实例（需实现 ``choose_move`` 或 ``get_best_move``）。
-            board_snapshot: 当前棋盘的深拷贝快照。
-            ai_color: AI 所执颜色（``'red'`` 或 ``'black'``）。
-            time_limit_s: 思考时间上限（秒）。
-            run_id: 本次计算的唯一标识，用于主线程过滤过期信号。
-            game_history_hashes: 从开局至今的 Zobrist 哈希列表（开局库等）。
-            move_history: 控制器 ``MoveEntry`` 列表副本，与终局长将判负规则对齐。
+            request_queue: 发往 ``ai_worker_main`` 的请求队列。
+            response_queue: 子进程返回结果的队列。
+            request_payload: 已序列化的单次搜索请求（含 ``request_id``）。
+            run_id: 与 ``request_payload['request_id']`` 一致，用于丢弃过期响应。
+            worker_process: 当前 AI 子进程句柄（用于检测异常退出）。
         """
         super().__init__()
-        self._ai = ai
-        self._board = board_snapshot
-        self._ai_color = ai_color
-        self._time_limit_s = time_limit_s
+        self._request_queue = request_queue
+        self._response_queue = response_queue
+        self._payload = request_payload
         self._run_id = run_id
-        self._game_history_hashes = list(game_history_hashes) if game_history_hashes else []
-        self._move_history = list(move_history) if move_history else []
+        self._worker_process = worker_process
 
     def run(self) -> None:
-        """线程执行体：在纯数据上计算走法，不触碰任何 Qt 对象。
-
-        计算完成后通过 ``move_ready`` 信号发射结果；
-        若发生异常，将错误信息封装在 stats 字典中一并发射。
-        """
+        """将请求交给子进程并等待结果；不触碰 Qt 对象。"""
         try:
-            if hasattr(self._ai, "choose_move"):
-                self._board.current_player = self._ai_color
-                move = self._ai.choose_move(
-                    self._board,
-                    time_limit=self._time_limit_s,
-                    game_history=self._game_history_hashes,
-                    move_history=self._move_history,
-                )
-            else:
-                self._board.current_player = self._ai_color
-                move = self._ai.get_best_move(
-                    self._board,
-                    time_limit=self._time_limit_s,
-                    game_history=self._game_history_hashes,
-                    move_history=self._move_history,
-                )
-            print("[后台计算] 已完成，正在发送结果信号")
-            stats = getattr(self._ai, "last_stats", None)
-            self.move_ready.emit(move, stats, self._run_id)
+            print("[GUI] 正通过独立搜索进程计算着法…")
+            drain_queue(self._response_queue)
+            self._request_queue.put(self._payload)
+            while True:
+                if not self._worker_process.is_alive():
+                    print("[GUI] AI 子进程异常退出")
+                    self.move_ready.emit(
+                        None,
+                        {"error": "AI 子进程异常退出"},
+                        self._run_id,
+                    )
+                    return
+                try:
+                    resp = self._response_queue.get(timeout=0.5)
+                except Empty:
+                    continue
+                rid = resp.get("request_id")
+                if rid != self._run_id:
+                    print(f"[GUI] 检测到过期 AI 结果 request_id={rid}，已丢弃")
+                    continue
+                if not resp.get("ok"):
+                    err = resp.get("error") or "unknown error"
+                    tb = resp.get("traceback")
+                    if tb:
+                        print(tb)
+                    self.move_ready.emit(None, {"error": err}, self._run_id)
+                    return
+                move = resp.get("move")
+                stats = resp.get("stats")
+                print("[GUI] 独立搜索进程已完成，正在发送结果信号")
+                self.move_ready.emit(move, stats, self._run_id)
+                return
         except Exception as e:
-            print("[后台计算] 发生异常:", e)
+            print("[GUI] AI 通信异常:", e)
             traceback.print_exc()
             self.move_ready.emit(None, {"error": str(e)}, self._run_id)
 
@@ -484,6 +504,9 @@ class MainWindow(QMainWindow):
         self._selected_item: Optional[PixmapPieceItem] = None
         self._ai_thread: Optional[AIMoveThread] = None
         self._run_id = 0
+        self._ai_worker_process: Optional[multiprocessing.Process] = None
+        self._ai_request_queue: Optional[multiprocessing.Queue] = None
+        self._ai_response_queue: Optional[multiprocessing.Queue] = None
 
         self._init_window()
         self._init_ui()
@@ -764,14 +787,17 @@ class MainWindow(QMainWindow):
 
     def _stop_game(self) -> None:
         """结束当前对局：中断 AI 线程 → 恢复配置模式 → 清除交互状态。"""
-        # 1) 中断 AI 线程
+        # 1) 使当前搜索失效；先关闭 AI 子进程，通信线程会因检测不到存活 worker 而尽快退出
         self._run_id += 1
         if self._ai_thread and self._ai_thread.isRunning():
-            self._ai_thread.requestInterruption()
             try:
                 self._ai_thread.move_ready.disconnect(self._on_ai_move_ready)
             except Exception:
                 pass
+            self._shutdown_ai_worker_process()
+            self._ai_thread.wait(8000)
+        else:
+            self._shutdown_ai_worker_process()
         self._ai_thread = None
 
         # 2) 切换为"配置中"状态
@@ -1044,6 +1070,48 @@ class MainWindow(QMainWindow):
         self.board_view.animate_move(move)
         self._finalize_after_legal_move(outcome)
 
+    # ────────────────────── 独立 AI 子进程 ──────────────────────
+
+    def _ensure_ai_worker(self) -> None:
+        """懒启动长驻 AI 子进程（spawn）；若已崩溃则重启。"""
+        ctx = multiprocessing.get_context("spawn")
+        need = self._ai_worker_process is None or not self._ai_worker_process.is_alive()
+        if need:
+            if self._ai_worker_process is not None:
+                print("[GUI] 检测到 AI 子进程异常退出，正在重启…")
+            self._ai_request_queue = ctx.Queue()
+            self._ai_response_queue = ctx.Queue()
+            self._ai_worker_process = ctx.Process(
+                target=ai_worker_main,
+                args=(self._ai_request_queue, self._ai_response_queue),
+                daemon=True,
+                name="ChineseChessAIWorker",
+            )
+            self._ai_worker_process.start()
+            print("[GUI] 已启动 AI 子进程搜索")
+
+    def _shutdown_ai_worker_process(self) -> None:
+        """关闭 AI 子进程（窗口退出时调用）。"""
+        if self._ai_worker_process is None or not self._ai_worker_process.is_alive():
+            self._ai_worker_process = None
+            self._ai_request_queue = None
+            self._ai_response_queue = None
+            return
+        shutdown_worker(self._ai_request_queue)
+        self._ai_worker_process.join(timeout=3.0)
+        if self._ai_worker_process.is_alive():
+            print("[GUI] AI 子进程未正常退出，正在终止…")
+            self._ai_worker_process.terminate()
+            self._ai_worker_process.join(timeout=2.0)
+        self._ai_worker_process = None
+        self._ai_request_queue = None
+        self._ai_response_queue = None
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """窗口关闭时结束 AI 子进程。"""
+        self._shutdown_ai_worker_process()
+        super().closeEvent(event)
+
     # ────────────────────── AI 后台线程 ──────────────────────
 
     def check_and_run_ai(self) -> None:
@@ -1074,18 +1142,30 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"{side} · {label} 思考中…")
         self.append_log(f"[界面] {side} · {label}，开始计算…")
 
-        board_snapshot = self.controller.board.copy()
         run_id = self._run_id
-        game_hist = list(self.controller.game_history_hashes)
-        move_hist = list(self.controller.history)
+        self._ensure_ai_worker()
+        if (
+            self._ai_request_queue is None
+            or self._ai_response_queue is None
+            or self._ai_worker_process is None
+        ):
+            self.append_log("[界面] 无法启动 AI 子进程")
+            return
+        payload = {
+            "request_id": run_id,
+            "board": serialize_board(self.controller.board),
+            "move_history": serialize_move_history(list(self.controller.history)),
+            "game_history": list(self.controller.game_history_hashes),
+            "ai_config": build_ai_config_dict(current_agent),
+            "ai_color": cp,
+            "time_limit_s": self._AI_TIME_LIMIT_S,
+        }
         self._ai_thread = AIMoveThread(
-            ai=current_agent,
-            board_snapshot=board_snapshot,
-            ai_color=cp,
-            time_limit_s=self._AI_TIME_LIMIT_S,
-            run_id=run_id,
-            game_history_hashes=game_hist,
-            move_history=move_hist,
+            self._ai_request_queue,
+            self._ai_response_queue,
+            payload,
+            run_id,
+            self._ai_worker_process,
         )
         self._ai_thread.move_ready.connect(self._on_ai_move_ready)
         self._ai_thread.start()
