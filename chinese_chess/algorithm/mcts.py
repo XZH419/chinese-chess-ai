@@ -791,17 +791,12 @@ def _simulate(
 ) -> Tuple[float, Set[Move4], Set[Move4]]:
     """轻量级伪合法模拟（Lightweight Pseudo-legal Rollout）。
 
-    为了榨取极致性能，模拟阶段跳过昂贵的完整合法性校验和终局检测
-    （``Rules.winner()`` 内部需要生成全量合法走法，占 profile 90% 耗时），
-    仅生成几何伪合法走法 (``get_pseudo_legal_moves``)，并用以下 O(1) 级别的
-    快速检查作为兜底：
+    为了榨取极致性能，模拟阶段刻意跳过昂贵的完整合法性校验与
+    「送将/自将」检测。只生成几何伪合法走法 (``get_pseudo_legal_moves``)，
+    并仅保留如下极简兜底：
 
-    1. **被吃将即判负**：每步开头检测对方老将是否处于被将军状态——
-       若是，说明上一步行棋方未解将或主动送将，当前行棋方可"吃将"获胜。
-    2. **一击必杀**：生成伪合法走法后，先扫描对方老将坐标是否可直达；
-       若有可直接吃将的着法，立即执行并判胜。
-    3. **启发式走子**：分级 forcing-first（将杀 / 将军 / 高价值吃子 / …），
-       不做自将 / 白脸将检查。非法状态由下一步的"被吃将"检测兜底。
+    1. **一击必杀**：若存在可直接吃将的着法，立即执行并判胜（伪合法生成器会过滤吃将着法，因此需专门检测）。
+    2. **将被吃掉即终局**：每步落子后仅检查将/帅坐标是否消失（O(1)）。
 
     同时记录双方尝试过的着法集合，供 RAVE 反向传播使用。
 
@@ -834,19 +829,6 @@ def _simulate(
         cp = sim_board.current_player
         opp = "black" if cp == "red" else "red"
 
-        if Rules.is_move_limit_draw(hist):
-            return 0.5, red_moves, black_moves
-
-        st_pf, _off_pf = Rules.perpetual_check_status(sim_board, hist)
-        if st_pf == "forfeit" and _off_pf is not None:
-            w_pf = "black" if _off_pf == "red" else "red"
-            return (1.0 if w_pf == root_player else 0.0), red_moves, black_moves
-
-        # O(1) 终局检测：前一步行棋方若送将 / 未解将，
-        # 对方老将此刻处于被将军状态 → 当前行棋方可"吃将"获胜
-        if Rules.is_king_in_check(sim_board, opp):
-            return (1.0 if cp == root_player else 0.0), red_moves, black_moves
-
         moves = list(Rules.get_pseudo_legal_moves(sim_board, cp))
         if not moves:
             return (0.0 if cp == root_player else 1.0), red_moves, black_moves
@@ -866,7 +848,7 @@ def _simulate(
                     black_moves.add(king_cap)
                 return (1.0 if cp == root_player else 0.0), red_moves, black_moves
 
-        # 启发式走子：policy 层 forcing-first，非法由下一步 O(1) 终局检测兜底
+        # 极致性能：不做送将/自将过滤，直接随机走子；终局只靠「吃将」与「将消失」兜底
         chosen, _ = _pick_rollout_move_fast(
             sim_board,
             moves,
@@ -880,6 +862,12 @@ def _simulate(
             red_moves.add(chosen)
         else:
             black_moves.add(chosen)
+
+        # O(1) 终局兜底：将/帅被吃掉即终局（包括允许“自杀”导致下一手被吃将的情形）
+        if sim_board.red_king_pos is None:
+            return (0.0 if root_player == "red" else 1.0), red_moves, black_moves
+        if sim_board.black_king_pos is None:
+            return (1.0 if root_player == "red" else 0.0), red_moves, black_moves
 
     # 超过截断步数仍未分胜负，调用静态评估函数兜底
     return _eval_to_winrate(sim_board, root_player), red_moves, black_moves
@@ -965,53 +953,12 @@ def _pick_rollout_move_fast(
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
     mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
 ) -> Tuple[Move4, bool]:
-    """分级 forcing-first rollout：将 / 将军 / 高价值吃子 / 吃子 / 推进 / 随机。
+    """极简 rollout：直接随机选一步伪合法走法并执行。
 
-    吃子按子力分档不调用将军判定；仅对**非吃子**着法调用 ``mcts_fast`` / LRU，
-    减少 rollout 内 ``_move_gives_check`` 次数。不调用 ``Evaluation.evaluate``。
+    注意：模拟阶段允许“送将/自杀”以换取吞吐量；终局仅靠「吃将」与「将消失」兜底。
     返回 ``(move, 是否为吃子)``，后者供 ``mcts_minimax`` 模块中 probe 触发等逻辑使用。
     """
-    cp = sim_board.current_player
-    pv = Evaluation.PIECE_VALUES
-    checking: List[Move4] = []
-    hv_caps: List[Move4] = []
-    lv_caps: List[Move4] = []
-    aggressive: List[Move4] = []
-
-    for m in moves:
-        victim = b_grid[m[2]][m[3]]
-        if victim is not None and victim.piece_type == "jiang":
-            was_cap = True
-            sim_board.apply_move(*m)
-            return m, was_cap
-        if victim is not None:
-            if pv.get(victim.piece_type, 0) >= _POLICY_HVCAP_VALUE:
-                hv_caps.append(m)
-            else:
-                lv_caps.append(m)
-            continue
-        if mcts_gives is not None:
-            if mcts_fast_move_gives_check(sim_board, m, cp, mcts_gives):
-                checking.append(m)
-            elif _is_aggressive_push(sim_board, cp, m, b_grid):
-                aggressive.append(m)
-        else:
-            if _move_gives_check(sim_board, m, cp, gives_check_cache):
-                checking.append(m)
-            elif _is_aggressive_push(sim_board, cp, m, b_grid):
-                aggressive.append(m)
-
-    m_pick: Optional[Move4] = None
-    if checking and random.random() < _ROLL_PREFER_CHECK:
-        m_pick = random.choice(checking)
-    elif hv_caps and random.random() < _ROLL_PREFER_HVCAP:
-        m_pick = random.choice(hv_caps)
-    elif (hv_caps or lv_caps) and random.random() < _ROLL_PREFER_ANY_CAPTURE:
-        m_pick = random.choice(hv_caps + lv_caps)
-    elif aggressive and random.random() < _ROLL_PREFER_AGGRESSIVE:
-        m_pick = random.choice(aggressive)
-    if m_pick is None:
-        m_pick = random.choice(moves)
+    m_pick = random.choice(moves)
     was_capture = b_grid[m_pick[2]][m_pick[3]] is not None
     sim_board.apply_move(*m_pick)
     return m_pick, was_capture
