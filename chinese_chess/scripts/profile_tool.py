@@ -263,7 +263,9 @@ def cmd_profile_mcts(args: argparse.Namespace) -> None:
     profiler.disable()
 
     total_visits = sum(int(s["visits"]) for s in result.values())
-    print(f"搜索完成: {len(result)} 个根子节点, 合计 visits={total_visits}")
+    print(
+        f"搜索完成: {len(result)} 个根着法分支，合计访问次数={total_visits}"
+    )
     print()
 
     stream = io.StringIO()
@@ -273,8 +275,8 @@ def cmd_profile_mcts(args: argparse.Namespace) -> None:
     print(stream.getvalue())
 
     print("=" * 72)
-    print("性能分析完成。请重点检查 get_pseudo_legal_moves、is_king_in_check 等")
-    print("规则函数的 tottime 占比。")
+    print("性能分析完成。请重点查看「伪合法走法生成」「老将是否被将军」等")
+    print("规则相关函数在「函数自身耗时」排序中的占比。")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -292,7 +294,10 @@ def cmd_profile_mcts_minimax(args: argparse.Namespace) -> None:
 
     board = Board()
     print(f"[MCTS-Minimax 性能分析] 初始局面子力数: {board.piece_count()}")
-    print(f"[MCTS-Minimax 性能分析] cProfile: max_simulations={sims}, time_limit=999")
+    print(
+        f"[MCTS-Minimax 性能分析] cProfile: max_simulations={sims}, "
+        f"time_limit=999（无时间限制）"
+    )
     print()
 
     profiler = cProfile.Profile()
@@ -308,10 +313,12 @@ def cmd_profile_mcts_minimax(args: argparse.Namespace) -> None:
     profiler.disable()
 
     total_visits = sum(int(s["visits"]) for s in child_stats.values())
-    print(f"搜索完成: {len(child_stats)} 个根子节点, 合计 visits={total_visits}")
     print(
-        f"Probe: {probe_stats.get('probes', 0)} 次, "
-        f"budget calls {probe_stats.get('budget_calls_used', 0)}/"
+        f"搜索完成: {len(child_stats)} 个根着法分支，合计访问次数={total_visits}"
+    )
+    print(
+        f"局面探查次数: {probe_stats.get('probes', 0)}，"
+        f"子搜索预算（调用次数）: {probe_stats.get('budget_calls_used', 0)}/"
         f"{probe_stats.get('budget_calls_max', 0)}"
     )
     print()

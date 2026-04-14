@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless AI vs AI benchmark: no GUI, aggregate win rates and search stats."""
+"""无图形界面的 AI 对弈基准脚本：汇总胜率与搜索统计。"""
 
 from __future__ import annotations
 
@@ -106,6 +106,20 @@ def _winner_label(w: Optional[str]) -> str:
     return "和棋"
 
 
+def _engine_summary_cn(engine: str, depth: int, sims: int) -> str:
+    """将 CLI 引擎键转为中文说明（用于基准报告展示）。"""
+    e = _normalize_engine(engine)
+    if e == "minimax":
+        return f"Minimax AI（深度 {depth}）"
+    if e == "mcts":
+        return f"MCTS AI（模拟上限 {sims}）"
+    if e == "mcts_minimax":
+        return f"MCTS-Minimax AI（模拟上限 {sims}）"
+    if e == "random":
+        return "随机 AI"
+    return engine
+
+
 def build_agent(engine: str, *, depth: int, sims: int, stochastic: bool) -> Any:
     e = _normalize_engine(engine)
     if e == "minimax":
@@ -116,7 +130,7 @@ def build_agent(engine: str, *, depth: int, sims: int, stochastic: bool) -> Any:
         return MCTSMinimaxAI(max_simulations=sims, time_limit=999.0, verbose=False)
     if e == "random":
         return RandomAI()
-    raise ValueError(f"unsupported engine: {engine!r}")
+    raise ValueError(f"不支持的引擎: {engine!r}")
 
 
 def _tally_last_stats(agent: Any, bucket: dict) -> None:
@@ -246,24 +260,26 @@ def main() -> None:
     red_avg_t, red_avg_n = _avg("red")
     black_avg_t, black_avg_n = _avg("black")
 
+    red_desc = _engine_summary_cn(args.red_ai, args.red_depth, args.red_sims)
+    black_desc = _engine_summary_cn(args.black_ai, args.black_depth, args.black_sims)
     report = f"""## 对弈基准汇总
 
 | 指标 | 数值 |
 |------|------|
 | 对局数 | {args.games} |
-| 红方引擎 | {args.red_ai} (depth={args.red_depth}, sims={args.red_sims}) |
-| 黑方引擎 | {args.black_ai} (depth={args.black_depth}, sims={args.black_sims}) |
-| Minimax 根节点随机 | {'开启' if args.stochastic else '关闭'} |
+| 红方 | {red_desc}（CLI 键: {args.red_ai}） |
+| 黑方 | {black_desc}（CLI 键: {args.black_ai}） |
+| Minimax 根节点随机着法 | {'开启' if args.stochastic else '关闭'} |
 | **红方胜率** | {red_rate:.1f}% |
 | **黑方胜率** | {black_rate:.1f}% |
-| **平局率** | {draw_rate:.1f}% |
-| **红方单步平均耗时 (s)** | {red_avg_t:.4f} |
-| **黑方单步平均耗时 (s)** | {black_avg_t:.4f} |
+| **和棋率** | {draw_rate:.1f}% |
+| **红方单步平均耗时（秒）** | {red_avg_t:.4f} |
+| **黑方单步平均耗时（秒）** | {black_avg_t:.4f} |
 | **红方单步平均节点/模拟量** | {red_avg_n:.1f} |
 | **黑方单步平均节点/模拟量** | {black_avg_n:.1f} |
 
-注：耗时与节点/模拟量来自各引擎每步搜索后的 ``last_stats``（Minimax 为 ``nodes_evaluated``，
-MCTS / MCTS-Minimax 为 ``simulations`` 或与 ``nodes_evaluated`` 的合成字段）。
+说明：上表中的耗时与节点或模拟次数，来自每步搜索后各引擎写入的 `last_stats`；
+Minimax 以「评估节点数」为主，MCTS / MCTS-Minimax 以「模拟次数」或合成节点统计为主。
 """
     print(report)
 

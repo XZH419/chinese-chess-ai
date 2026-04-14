@@ -880,7 +880,7 @@ class MCTSAI:
         max_simulations: 所有 worker 合计的最大模拟次数。
         time_limit: 搜索时间上限（秒），与 ``max_simulations`` 取先到者。
         workers: 并行进程数（0 或 1 = 单进程，>1 = 多进程根并行）。
-            默认 ``None`` 表示自动检测 ``min(4, cpu_count)``。
+            默认 ``None`` 表示自动检测 ``min(8, cpu_count)``。
         verbose: 搜索结束后是否打印统计信息到控制台。
     """
 
@@ -896,7 +896,7 @@ class MCTSAI:
         Args:
             max_simulations: 每次搜索的总模拟次数上限。
             time_limit: 搜索时间上限（秒）。
-            workers: 并行 worker 数。None 表示自动检测 CPU 核心数。
+            workers: 并行 worker 数。None 表示自动取 ``min(8, CPU 逻辑核心数)``。
             verbose: 是否打印搜索统计。
         """
         self.max_simulations = max_simulations
@@ -904,7 +904,7 @@ class MCTSAI:
         self.verbose = verbose
         if workers is None:
             try:
-                self.workers = min(4, multiprocessing.cpu_count())
+                self.workers = min(8, multiprocessing.cpu_count())
             except NotImplementedError:
                 self.workers = 1
         else:
@@ -947,7 +947,7 @@ class MCTSAI:
         """执行 MCTS-RAVE 搜索并返回最佳走法。
 
         搜索前先查询开局库；命中时瞬间返回，``last_stats`` 中标注
-        ``opening_book=True`` 与 ``win_rate="Book Move"``。
+        ``opening_book=True`` 与 ``win_rate="开局库"``。
 
         Args:
             board: 当前棋盘状态。
@@ -970,7 +970,7 @@ class MCTSAI:
                     "time_taken": 0.0,
                     "simulations": 0,
                     "workers": self.workers,
-                    "win_rate": "Book Move",
+                    "win_rate": "开局库",
                     "opening_book": True,
                 }
                 if self.verbose:
@@ -1035,7 +1035,9 @@ class MCTSAI:
             "win_rate": f"{best_wr * 100:.1f}%",
         }
         if self.verbose:
-            print(f"MCTS 搜索完成，总模拟次数: {total_sims}  ({effective_workers} workers)")
+            print(
+                f"MCTS 搜索完成，总模拟次数: {total_sims}  （并行进程数: {effective_workers}）"
+            )
             print(f"搜索耗时 (秒): {elapsed:.3f}")
             if best_move is not None:
                 print(f"最佳走法: {best_move}  胜率: {best_wr:.1%}  访问: {best_visits}")
@@ -1073,8 +1075,8 @@ class MCTSAI:
             keys = list(OPENING_BOOK.keys())
             disp = keys if len(keys) <= 48 else keys[:24] + ["..."] + keys[-16:]
             print(
-                f"[MCTS 开局库] 根局面未命中（zkey={zkey:#x}）；"
-                f"OPENING_BOOK 共 {len(keys)} 个键: {disp}"
+                f"[MCTS 开局库] 根局面未命中（局面键 zkey={zkey:#x}）；"
+                f"开局库共 {len(keys)} 个局面键，示例: {disp}"
             )
         if book_moves:
             valid = [

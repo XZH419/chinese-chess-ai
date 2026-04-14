@@ -42,9 +42,9 @@ def main(controller: Optional["GameController"] = None) -> None:
         controller.maybe_play_ai_turn(time_limit=0.1)
         plies += 1
 
-    print("smoke ok")
-    print("plies", plies)
-    print("winner", controller.winner())
+    print("冒烟测试通过")
+    print("已执行半回合数:", plies)
+    print("终局胜者:", controller.winner())
 
 
 if __name__ == "__main__":

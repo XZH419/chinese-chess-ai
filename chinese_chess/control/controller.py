@@ -23,7 +23,7 @@ def describe_player_agent(agent: Optional[Any]) -> str:
     """生成单侧玩家的展示名称（不含"红方"/"黑方"前缀）。
 
     根据 agent 的类型和关键参数，返回一段简短的可读描述，
-    例如 ``"Minimax, Depth=3"`` 或 ``"MCTS, Sims=5000, Workers=4"``。
+    例如 ``"Minimax AI，深度 3"`` 或 ``"MCTS AI，模拟上限 5000，并行进程数 8"``。
 
     Args:
         agent: AI 实例，若为 ``None`` 则视为人类玩家。
@@ -32,24 +32,28 @@ def describe_player_agent(agent: Optional[Any]) -> str:
         str: 玩家类型的简短描述字符串。
     """
     if agent is None:
-        return "Human"
+        return "玩家"
     cls = type(agent).__name__
     if cls == "MinimaxAI":
         d = getattr(agent, "depth", None)
-        return f"Minimax, Depth={d}" if isinstance(d, int) else "Minimax"
+        return f"Minimax AI，深度 {d}" if isinstance(d, int) else "Minimax AI"
     if cls == "RandomAI":
-        return "Random"
+        return "随机 AI"
     if cls == "MCTSAI":
         sims = getattr(agent, "max_simulations", None)
         w = getattr(agent, "workers", 1)
-        return f"MCTS, Sims={sims}, Workers={w}" if sims is not None else "MCTS"
+        return (
+            f"MCTS AI，模拟上限 {sims}，并行进程数 {w}"
+            if sims is not None
+            else "MCTS AI"
+        )
     if cls == "MCTSMinimaxAI":
         sims = getattr(agent, "max_simulations", None)
         w = getattr(agent, "workers", 1)
         return (
-            f"MCTS-Minimax, Sims={sims}, Workers={w}"
+            f"MCTS-Minimax AI，模拟上限 {sims}，并行进程数 {w}"
             if sims is not None
-            else "MCTS-Minimax"
+            else "MCTS-Minimax AI"
         )
     return cls
 
@@ -57,7 +61,7 @@ def describe_player_agent(agent: Optional[Any]) -> str:
 def format_matchup_line(red_agent: Optional[Any], black_agent: Optional[Any]) -> str:
     """格式化红黑双方的对阵描述行。
 
-    生成形如 ``"红方 (Human) vs 黑方 (Minimax, Depth=3)"`` 的完整对阵说明，
+    生成形如 ``"红方（玩家）对阵 黑方（Minimax AI，深度 3）"`` 的完整对阵说明，
     供 CLI / GUI 显示当前对局配置。
 
     Args:
@@ -68,8 +72,8 @@ def format_matchup_line(red_agent: Optional[Any], black_agent: Optional[Any]) ->
         str: 完整的红黑对阵描述字符串。
     """
     return (
-        f"红方 ({describe_player_agent(red_agent)}) "
-        f"vs 黑方 ({describe_player_agent(black_agent)})"
+        f"红方（{describe_player_agent(red_agent)}）"
+        f"对阵 黑方（{describe_player_agent(black_agent)}）"
     )
 
 
@@ -365,7 +369,7 @@ class GameController:
         供 CLI / GUI 标题栏或日志输出使用。
 
         Returns:
-            str: 形如 ``"红方 (Human) vs 黑方 (Minimax, Depth=3)"`` 的描述。
+            str: 形如 ``"红方（玩家）对阵 黑方（Minimax AI，深度 3）"`` 的描述。
         """
         return format_matchup_line(self.red_agent, self.black_agent)
 

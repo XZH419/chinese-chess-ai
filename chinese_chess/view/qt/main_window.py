@@ -52,11 +52,11 @@ Pos = Tuple[int, int]
 
 # ── GUI 展示用引擎名 ↔ 内部 key（勿用于非界面逻辑）──
 ENGINE_TO_DISPLAY_NAME: Dict[str, str] = {
-    "human": "Player",
-    "mcts": "MCTS_AI",
-    "minimax": "Minimax_AI",
-    "mcts_minimax": "MCTS_Minimax_AI",
-    "random": "Random_AI",
+    "human": "玩家",
+    "mcts": "MCTS AI",
+    "minimax": "Minimax AI",
+    "mcts_minimax": "MCTS-Minimax AI",
+    "random": "随机 AI",
 }
 # 下拉框等「展示名 → 内部 key」；与上表互逆，单一数据源避免不一致
 DISPLAY_NAME_TO_ENGINE: Dict[str, str] = {
@@ -186,11 +186,11 @@ class AIMoveThread(QThread):
                     game_history=self._game_history_hashes,
                     move_history=self._move_history,
                 )
-            print("[AI Thread] finished, emitting signal")
+            print("[后台计算] 已完成，正在发送结果信号")
             stats = getattr(self._ai, "last_stats", None)
             self.move_ready.emit(move, stats, self._run_id)
         except Exception as e:
-            print("[AI Thread] exception:", e)
+            print("[后台计算] 发生异常:", e)
             traceback.print_exc()
             self.move_ready.emit(None, {"error": str(e)}, self._run_id)
 
@@ -341,7 +341,7 @@ class XiangqiBoardView(QGraphicsView):
         rc = self.view_to_model(x, y)
         if rc is not None:
             row, col = rc
-            print(f"Mouse Click: x={x}, y={y} -> Board: row={row}, col={col}")
+            print(f"[视图] 鼠标点击 场景坐标=({x:.0f},{y:.0f}) → 棋盘格 row={row}, col={col}")
             self.square_clicked.emit(row, col)
         super().mousePressEvent(event)
 
@@ -449,7 +449,7 @@ class MainWindow(QMainWindow):
 
     Attributes:
         controller: 游戏控制器实例。
-        human_color: 人机模式下人类所执色（红/黑）；双方均为 Player 时可为 ``None``，
+        human_color: 人机模式下人类所执色（红/黑）；双方均为玩家时可为 ``None``，
             走子以 ``board.current_player`` 为准。
         is_game_running: 是否处于对局进行中状态。
     """
@@ -471,7 +471,7 @@ class MainWindow(QMainWindow):
 
         Args:
             controller: 外部注入的游戏控制器实例。若为 ``None``，
-                则创建默认的 Player vs Player 控制器。若注入的控制器
+                则创建默认的玩家对玩家控制器。若注入的控制器
                 已绑定 AI 代理，窗口将自动同步 UI 配置并开始对局。
         """
         super().__init__()
@@ -660,7 +660,7 @@ class MainWindow(QMainWindow):
         用于外部注入已配置好的 Controller 时，将 AI 参数同步到 UI 控件。
 
         Args:
-            agent: AI 代理实例，``None`` 表示 Player（human）。
+            agent: AI 代理实例，``None`` 表示玩家（human）。
             label: 对应的参数标签控件。
             spin: 对应的参数数值输入框控件。
         """
@@ -704,7 +704,7 @@ class MainWindow(QMainWindow):
             spin: 参数数值输入框控件。
 
         Returns:
-            AI 代理实例；若选择 Player（human）则返回 ``None``。
+            AI 代理实例；若选择玩家（human）则返回 ``None``。
         """
         idx = combo.currentIndex()
         key = self._ENGINE_KEYS_ORDERED[idx]
@@ -786,7 +786,7 @@ class MainWindow(QMainWindow):
         self._selected_item = None
 
         self.status_label.setText("对局已结束，请重新配置后点击「开始对局」")
-        self.append_log("[UI] 对局已结束")
+        self.append_log("[界面] 对局已结束")
 
     def _set_config_enabled(self, enabled: bool) -> None:
         """批量启用或禁用所有配置面板控件。
@@ -831,25 +831,25 @@ class MainWindow(QMainWindow):
             return base
         if key == "minimax":
             d = getattr(agent, "depth", None)
-            return f"{base} · {d}" if isinstance(d, int) else base
+            return f"{base} · 深度 {d}" if isinstance(d, int) else base
         if key == "mcts":
             s = getattr(agent, "max_simulations", None)
             w = getattr(agent, "workers", 1)
-            return f"{base} · {s}/{w}" if s is not None else base
+            return f"{base} · 模拟上限 {s} · 并行进程 {w}" if s is not None else base
         if key == "mcts_minimax":
             s = getattr(agent, "max_simulations", None)
             w = getattr(agent, "workers", 1)
-            return f"{base} · {s}/{w}" if s is not None else base
+            return f"{base} · 模拟上限 {s} · 并行进程 {w}" if s is not None else base
         return base
 
     def _gui_matchup_line(self) -> str:
         """窗口标题与对局日志中的对阵行。"""
         r = self._gui_agent_brief(self.controller.red_agent)
         b = self._gui_agent_brief(self.controller.black_agent)
-        return f"红方 · {r} vs 黑方 · {b}"
+        return f"红方 · {r} 对阵 黑方 · {b}"
 
     def _sync_human_color_from_controller(self) -> None:
-        """根据控制器推断人机模式下人类所执色；双 Player 时为 ``None``。"""
+        """根据控制器推断人机模式下人类所执色；双方均为玩家时为 ``None``。"""
         r, b = self.controller.red_agent, self.controller.black_agent
         if r is None and b is not None:
             self.human_color = "red"
@@ -870,7 +870,7 @@ class MainWindow(QMainWindow):
         """将 AI 代理实例映射为 UI 下拉框对应的索引值。
 
         Args:
-            agent: AI 代理实例，``None`` 表示 Player（human）。
+            agent: AI 代理实例，``None`` 表示玩家（human）。
 
         Returns:
             int: 与 ``_ENGINE_KEYS_ORDERED`` 对齐的下拉框索引。
@@ -912,7 +912,7 @@ class MainWindow(QMainWindow):
             self._run_id += 1
             if outcome.move_limit_draw:
                 msg = (
-                    f"游戏结束：已达 {Rules.MAX_PLIES_AUTODRAW} 手限着（半回合计），和棋。"
+                    f"对局结束：已达 {Rules.MAX_PLIES_AUTODRAW} 手限着（半回合计），和棋。"
                 )
                 self.append_log(msg)
                 self.append_log("==========================")
@@ -922,18 +922,18 @@ class MainWindow(QMainWindow):
                 return
             if outcome.perpetual_forfeit:
                 side = "红" if outcome.winner == "red" else "黑"
-                msg = f"游戏结束：长将判负，{side}方获胜！"
+                msg = f"对局结束：长将判负，{side}方获胜！"
                 self.append_log(msg)
                 self.append_log("==========================")
                 self.status_label.setText(msg)
                 self._game_over_ui()
                 return
             if outcome.winner == "red":
-                msg = "游戏结束：红方获胜！"
+                msg = "对局结束：红方获胜！"
             elif outcome.winner == "black":
-                msg = "游戏结束：黑方获胜！"
+                msg = "对局结束：黑方获胜！"
             else:
-                msg = "游戏结束：和棋（死局）！"
+                msg = "对局结束：和棋（死局）！"
             self.append_log(msg)
             self.append_log("==========================")
             QMessageBox.information(self, "对局结束", msg)
@@ -971,7 +971,7 @@ class MainWindow(QMainWindow):
             elif winner == "black":
                 self.status_label.setText("黑方获胜！")
             else:
-                self.status_label.setText("游戏结束：和棋！")
+                self.status_label.setText("对局结束：和棋！")
             return
 
         player = result["current_player"]
@@ -1035,11 +1035,11 @@ class MainWindow(QMainWindow):
         if not outcome.ok:
             self.status_label.setText(outcome.message or "无效走子")
             if outcome.message:
-                self.append_log(f"[UI] {outcome.message}")
+                self.append_log(f"[界面] {outcome.message}")
             return
 
-        print(f"[UI] player move applied: {move}")
-        self.append_log(f"[UI] {ENGINE_TO_DISPLAY_NAME['human']} move: {move}")
+        print(f"[界面] 玩家已落子: {move}")
+        self.append_log(f"[界面] 玩家走法: {move}")
         self.append_log("--------------------------")
         self.board_view.animate_move(move)
         self._finalize_after_legal_move(outcome)
@@ -1070,9 +1070,9 @@ class MainWindow(QMainWindow):
 
         side = self._side_name(cp)
         label = self._agent_label(current_agent)
-        print(f"[UI] {side} · {label} 思考中，启动计算…")
+        print(f"[界面] {side} · {label} 思考中，启动计算…")
         self.status_label.setText(f"{side} · {label} 思考中…")
-        self.append_log(f"[UI] {side} · {label}，开始计算…")
+        self.append_log(f"[界面] {side} · {label}，开始计算…")
 
         board_snapshot = self.controller.board.copy()
         run_id = self._run_id
@@ -1104,8 +1104,13 @@ class MainWindow(QMainWindow):
         """
         if run_id != self._run_id:
             return
-        print(f"[UI] AI move signal received: {move}")
+        print(f"[界面] 已收到 AI 走法信号: {move}")
         if stats:
+            if stats.get("error"):
+                self.append_log(f"[界面] AI 计算异常：{stats['error']}")
+                QMessageBox.critical(self, "计算异常", str(stats["error"]))
+                self._refresh_status()
+                return
             if stats.get("opening_book"):
                 self.append_log("命中开局库 | 耗时: 0.0s")
             elif stats.get("random"):
@@ -1116,7 +1121,7 @@ class MainWindow(QMainWindow):
                 self._log_mcts_stats(stats)
             else:
                 self._log_minimax_stats(stats)
-        self.append_log("[UI] 已收到走法，执行落子。")
+        self.append_log("[界面] 已收到走法，执行落子。")
         self.append_log("--------------------------")
         if move:
 
@@ -1139,8 +1144,8 @@ class MainWindow(QMainWindow):
         time_str = (
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
         )
-        self.append_log(f"{ENGINE_TO_DISPLAY_NAME['random']} — move")
-        self.append_log(f"{ENGINE_TO_DISPLAY_NAME['random']} — time (s): {time_str}")
+        self.append_log(f"{ENGINE_TO_DISPLAY_NAME['random']} — 已选出走法")
+        self.append_log(f"{ENGINE_TO_DISPLAY_NAME['random']} — 耗时（秒）: {time_str}")
 
     def _log_mcts_stats(self, stats: dict) -> None:
         """将 MCTS 搜索统计信息格式化后写入日志。
@@ -1153,12 +1158,12 @@ class MainWindow(QMainWindow):
         time_str = (
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
         )
-        self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — search time (s): {time_str}")
-        self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — simulations: {stats.get('simulations', 0)}")
-        self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — parallel: {stats.get('workers', 1)}")
+        self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — 搜索耗时（秒）: {time_str}")
+        self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — 模拟次数: {stats.get('simulations', 0)}")
+        self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — 并行进程数: {stats.get('workers', 1)}")
         win_rate = stats.get("win_rate", "")
         if win_rate:
-            self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — win rate: {win_rate}")
+            self.append_log(f"{ENGINE_TO_DISPLAY_NAME['mcts']} — 估计胜率: {win_rate}")
 
     def _log_mcts_minimax_stats(self, stats: dict) -> None:
         """将 MCTS_Minimax_AI 搜索的统计信息写入日志。"""
@@ -1167,23 +1172,23 @@ class MainWindow(QMainWindow):
         time_str = (
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
         )
-        self.append_log(f"{mx} — search time (s): {time_str}")
-        self.append_log(f"{mx} — simulations: {stats.get('simulations', 0)}")
-        self.append_log(f"{mx} — parallel: {stats.get('workers', 1)}")
+        self.append_log(f"{mx} — 搜索耗时（秒）: {time_str}")
+        self.append_log(f"{mx} — 模拟次数: {stats.get('simulations', 0)}")
+        self.append_log(f"{mx} — 并行进程数: {stats.get('workers', 1)}")
         win_rate = stats.get("win_rate", "")
         if win_rate:
-            self.append_log(f"{mx} — win rate: {win_rate}")
+            self.append_log(f"{mx} — 估计胜率: {win_rate}")
         pc = stats.get("probe_count")
         pn = stats.get("probe_nodes")
         if pc is not None:
             self.append_log(
-                f"{mx} — {ENGINE_TO_DISPLAY_NAME['minimax']} sub-searches: {pc}"
-                + (f", nodes: {pn}" if pn is not None else "")
+                f"{mx} — Minimax 子搜索次数: {pc}"
+                + (f"，子搜索节点数: {pn}" if pn is not None else "")
             )
         bc = stats.get("budget_calls_used")
         bm = stats.get("budget_calls_max")
         if bc is not None and bm is not None:
-            self.append_log(f"{mx} — sub-search budget: {bc}/{bm}")
+            self.append_log(f"{mx} — 子搜索预算（调用次数）: {bc}/{bm}")
 
     def _log_minimax_stats(self, stats: dict) -> None:
         """将 Minimax 搜索统计信息格式化后写入日志。
@@ -1197,12 +1202,12 @@ class MainWindow(QMainWindow):
             f"{time_taken:.3f}" if isinstance(time_taken, (int, float)) else str(time_taken)
         )
         mn = ENGINE_TO_DISPLAY_NAME["minimax"]
-        self.append_log(f"{mn} — search time (s): {time_str}")
-        self.append_log(f"{mn} — depth: {stats.get('depth', '?')}")
-        self.append_log(f"{mn} — nodes: {stats.get('nodes_evaluated', '?')}")
+        self.append_log(f"{mn} — 搜索耗时（秒）: {time_str}")
+        self.append_log(f"{mn} — 搜索深度: {stats.get('depth', '?')}")
+        self.append_log(f"{mn} — 评估节点数: {stats.get('nodes_evaluated', '?')}")
         tt_hits = stats.get("tt_hits")
         if tt_hits is not None:
-            self.append_log(f"{mn} — TT hits: {tt_hits}")
+            self.append_log(f"{mn} — 置换表命中次数: {tt_hits}")
 
 
 if __name__ == "__main__":

@@ -559,8 +559,8 @@ class MinimaxAI:
                 keys = list(OPENING_BOOK.keys())
                 disp = keys if len(keys) <= 48 else keys[:24] + ["..."] + keys[-16:]
                 print(
-                    f"[opening book] 根局面未命中（zkey={zkey:#x}）；"
-                    f"OPENING_BOOK 共 {len(keys)} 个键: {disp}"
+                    f"[Minimax 开局库] 根局面未命中（局面键 zkey={zkey:#x}）；"
+                    f"开局库共 {len(keys)} 个局面键，示例: {disp}"
                 )
             if book_moves:
                 valid = [

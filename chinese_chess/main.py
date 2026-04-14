@@ -56,14 +56,14 @@ if __name__ == "__main__":
         type=str,
         default="human",
         metavar="KIND",
-        help="红方：human|minimax|random|mcts|mcts_minimax",
+        help="红方：human（玩家）|minimax|random|mcts|mcts_minimax",
     )
     parser.add_argument(
         "--black",
         type=str,
         default="minimax",
         metavar="KIND",
-        help="黑方：human|minimax|random|mcts|mcts_minimax",
+        help="黑方：human（玩家）|minimax|random|mcts|mcts_minimax",
     )
     parser.add_argument("--red-depth", type=int, default=3, help="红方为 Minimax 时的搜索深度（默认 3）")
     parser.add_argument("--black-depth", type=int, default=3, help="黑方为 Minimax 时的搜索深度（默认 3）")
@@ -120,12 +120,12 @@ if __name__ == "__main__":
                 time_limit=10.0,
                 verbose=False,
             )
-        raise ValueError(f"unknown player kind: {kind!r}")
+        raise ValueError(f"未知的玩家类型: {kind!r}")
 
     red_agent = build_agent(red_k, depth=args.red_depth, sims=args.red_sims)
     black_agent = build_agent(black_k, depth=args.black_depth, sims=args.black_sims)
 
-    print("[System] " + format_matchup_line(red_agent, black_agent))
+    print("[系统] " + format_matchup_line(red_agent, black_agent))
 
     controller = GameController(red_agent=red_agent, black_agent=black_agent)
 

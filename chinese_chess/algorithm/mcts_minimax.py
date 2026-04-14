@@ -1176,7 +1176,7 @@ class MCTSMinimaxAI:
     Args:
         max_simulations: 所有 worker 合计的最大模拟次数。
         time_limit: 搜索时间上限（秒）。
-        workers: 并行进程数（0/1 = 单进程）。
+        workers: 并行进程数（0/1 = 单进程）。默认 ``None`` 表示 ``min(8, cpu_count)``。
         probe_depth: minimax probe 默认深度。
         verbose: 搜索完成后是否输出统计信息。
     """
@@ -1202,7 +1202,7 @@ class MCTSMinimaxAI:
         self.probe_depth = probe_depth
         if workers is None:
             try:
-                self.workers = min(4, multiprocessing.cpu_count())
+                self.workers = min(8, multiprocessing.cpu_count())
             except NotImplementedError:
                 self.workers = 1
         else:
@@ -1247,11 +1247,11 @@ class MCTSMinimaxAI:
                     "time_taken": 0.0,
                     "simulations": 0,
                     "workers": self.workers,
-                    "win_rate": "Book Move",
+                    "win_rate": "开局库",
                     "opening_book": True,
                 }
                 if self.verbose:
-                    print(f"[MCTS-Minimax] 命中开局库: {book_move}")
+                    print(f"[MCTS-Minimax] 命中开局库！瞬间出棋: {book_move}")
                 return book_move
 
         # ── MCTS-Minimax 搜索 ──
@@ -1310,16 +1310,16 @@ class MCTSMinimaxAI:
         }
         if self.verbose:
             print(
-                f"[MCTS-Minimax] 搜索完成: {total_sims} sims, "
-                f"{effective_workers} workers, {elapsed:.3f}s"
+                f"[MCTS-Minimax] 搜索完成: 模拟次数 {total_sims}，"
+                f"并行进程数 {effective_workers}，耗时 {elapsed:.3f} 秒"
             )
             pc = probe_stats.get("probes", 0)
             pn = probe_stats.get("probe_nodes", 0)
             bc = probe_stats.get("budget_calls_used", 0)
             bm = probe_stats.get("budget_calls_max", 0)
             print(
-                f"[MCTS-Minimax] Probe: {pc} 次 ({pn} nodes), "
-                f"预算: {bc}/{bm} calls"
+                f"[MCTS-Minimax] 局面探查: {pc} 次（节点数 {pn}），"
+                f"子搜索预算（调用次数）: {bc}/{bm}"
             )
             if best_move is not None:
                 print(f"[MCTS-Minimax] 最佳走法: {best_move}  胜率: {best_wr:.1%}")
@@ -1341,8 +1341,8 @@ class MCTSMinimaxAI:
             keys = list(OPENING_BOOK.keys())
             disp = keys if len(keys) <= 48 else keys[:24] + ["..."] + keys[-16:]
             print(
-                f"[MCTS-Minimax 开局库] 根局面未命中（zkey={zkey:#x}）；"
-                f"OPENING_BOOK 共 {len(keys)} 个键: {disp}"
+                f"[MCTS-Minimax 开局库] 根局面未命中（局面键 zkey={zkey:#x}）；"
+                f"开局库共 {len(keys)} 个局面键，示例: {disp}"
             )
         if book_moves:
             valid = [
