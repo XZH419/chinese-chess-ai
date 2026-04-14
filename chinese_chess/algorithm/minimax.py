@@ -137,7 +137,7 @@ class MinimaxAI:
 
     def __init__(
         self,
-        depth=3,
+        depth=5,
         stochastic: bool = False,
         top_k: int = 2,
         tolerance: int = 5,

@@ -73,10 +73,10 @@ python -m pip install -r chinese_chess/requirements.txt
 在仓库根目录执行：
 
 ```bash
-python -m chinese_chess.main gui --red human --black minimax --black-depth 3
+python -m chinese_chess.main gui --red human --black minimax
 ```
 
-也可先构造控制器再启动窗口（见 `main.py` 与 `view/qt/main_window.py`）。若未安装 PyQt5，程序会提示中文错误信息并退出。
+也可先构造控制器再启动窗口（见 `main.py` 与 `view/qt/main_window.py`）。若未安装 PyQt5，程序会提示中文错误信息并退出。命令行中 Minimax 默认深度为 **5**；`--red-sims` / `--black-sims` 可省略，未指定时 **MCTS** 默认 5000 次模拟，**MCTS-Minimax** 默认 4000 次。
 
 ### 5.2 CLI 冒烟（无界面）
 
@@ -87,7 +87,7 @@ python -m chinese_chess.main cli --red random --black random
 ### 5.3 无头基准 `benchmark.py`
 
 ```bash
-python benchmark.py --games 20 --red-ai mcts --black-ai minimax --red-sims 5000 --red-depth 4 --black-depth 3
+python benchmark.py --games 20 --red-ai mcts --black-ai minimax --red-sims 5000 --red-depth 4 --black-depth 5
 ```
 
 引擎参数：`--red-ai` / `--black-ai` 取 `minimax`、`mcts`、`mcts_minimax`、`random`（旧别名 `hybrid` / `mcts_minmax` 会规范为 `mcts_minimax`）。Minimax 深度与 MCTS 类模拟上限分别用 `--*-depth`、`*-sims` 指定。

@@ -52,8 +52,8 @@ def _parse_args() -> argparse.Namespace:
         metavar="ENGINE",
         help="黑方引擎：minimax|mcts|mcts_minimax|random",
     )
-    parser.add_argument("--red-depth", type=int, default=3, dest="red_depth", help="红方 Minimax 搜索深度")
-    parser.add_argument("--black-depth", type=int, default=3, dest="black_depth", help="黑方 Minimax 搜索深度")
+    parser.add_argument("--red-depth", type=int, default=5, dest="red_depth", help="红方 Minimax 搜索深度（默认 5）")
+    parser.add_argument("--black-depth", type=int, default=5, dest="black_depth", help="黑方 Minimax 搜索深度（默认 5）")
     parser.add_argument(
         "--red-sims",
         type=int,

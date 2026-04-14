@@ -632,7 +632,7 @@ class MainWindow(QMainWindow):
             label.setText("深度：")
             label.show()
             spin.setRange(1, 8)
-            spin.setValue(3)
+            spin.setValue(5)
             spin.setSingleStep(1)
             spin.show()
         elif index == self._IDX_MCTS:
@@ -646,7 +646,7 @@ class MainWindow(QMainWindow):
             label.setText("模拟次数：")
             label.show()
             spin.setRange(100, 100000)
-            spin.setValue(5000)
+            spin.setValue(4000)
             spin.setSingleStep(500)
             spin.show()
         else:
@@ -670,7 +670,7 @@ class MainWindow(QMainWindow):
             return
         cls = type(agent).__name__
         if cls == "MinimaxAI":
-            d = getattr(agent, "depth", 3)
+            d = getattr(agent, "depth", 5)
             label.setText("深度：")
             label.show()
             spin.setRange(1, 8)
@@ -684,7 +684,7 @@ class MainWindow(QMainWindow):
             spin.setValue(int(s))
             spin.show()
         elif cls == "MCTSMinimaxAI":
-            s = getattr(agent, "max_simulations", 5000)
+            s = getattr(agent, "max_simulations", 4000)
             label.setText("模拟次数：")
             label.show()
             spin.setRange(100, 100000)

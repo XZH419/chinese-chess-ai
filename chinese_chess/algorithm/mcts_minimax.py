@@ -1174,7 +1174,7 @@ class MCTSMinimaxAI:
     支持多进程根节点并行 + 开局库查询 + DAG 置换合并。
 
     Args:
-        max_simulations: 所有 worker 合计的最大模拟次数。
+        max_simulations: 所有 worker 合计的最大模拟次数（默认 4000）。
         time_limit: 搜索时间上限（秒）。
         workers: 并行进程数（0/1 = 单进程）。默认 ``None`` 表示 ``min(8, cpu_count)``。
         probe_depth: minimax probe 默认深度。
@@ -1183,7 +1183,7 @@ class MCTSMinimaxAI:
 
     def __init__(
         self,
-        max_simulations: int = 5000,
+        max_simulations: int = 4000,
         time_limit: float = 10.0,
         workers: Optional[int] = None,
         probe_depth: int = _PROBE_DEFAULT_DEPTH,

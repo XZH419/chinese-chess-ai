@@ -23,7 +23,7 @@ def describe_player_agent(agent: Optional[Any]) -> str:
     """生成单侧玩家的展示名称（不含"红方"/"黑方"前缀）。
 
     根据 agent 的类型和关键参数，返回一段简短的可读描述，
-    例如 ``"Minimax AI，深度 3"`` 或 ``"MCTS AI，模拟上限 5000，并行进程数 8"``。
+    例如 ``"Minimax AI，深度 5"`` 或 ``"MCTS AI，模拟上限 5000，并行进程数 8"``。
 
     Args:
         agent: AI 实例，若为 ``None`` 则视为人类玩家。

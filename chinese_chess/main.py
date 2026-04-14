@@ -6,8 +6,8 @@
 
 启动示例::
 
-    # GUI 模式：人类 vs Minimax（深度 3）
-    python -m chinese_chess.main gui --red human --black minimax --black-depth 3
+    # GUI 模式：人类 vs Minimax（深度 5）
+    python -m chinese_chess.main gui --red human --black minimax --black-depth 5
 
     # CLI 模式：MCTS vs Minimax
     python -m chinese_chess.main cli --red mcts --black minimax
@@ -28,6 +28,7 @@
 import sys
 import os
 import argparse
+from typing import Optional
 
 # 确保仓库根目录在导入路径中，使 `import chinese_chess...` 在
 # 用户从仓库根目录执行 `python chinese_chess/main.py` 时也能正常工作。
@@ -65,19 +66,21 @@ if __name__ == "__main__":
         metavar="KIND",
         help="黑方：human（玩家）|minimax|random|mcts|mcts_minimax",
     )
-    parser.add_argument("--red-depth", type=int, default=3, help="红方为 Minimax 时的搜索深度（默认 3）")
-    parser.add_argument("--black-depth", type=int, default=3, help="黑方为 Minimax 时的搜索深度（默认 3）")
+    parser.add_argument("--red-depth", type=int, default=5, help="红方为 Minimax 时的搜索深度（默认 5）")
+    parser.add_argument("--black-depth", type=int, default=5, help="黑方为 Minimax 时的搜索深度（默认 5）")
     parser.add_argument(
         "--red-sims",
         type=int,
-        default=5000,
-        help="红方为 MCTS / MCTS-Minimax 时的最大模拟次数（默认 5000）",
+        default=None,
+        metavar="N",
+        help="红方 MCTS / MCTS-Minimax 的最大模拟次数；省略时 MCTS 默认 5000，MCTS-Minimax 默认 4000",
     )
     parser.add_argument(
         "--black-sims",
         type=int,
-        default=5000,
-        help="黑方为 MCTS / MCTS-Minimax 时的最大模拟次数（默认 5000）",
+        default=None,
+        metavar="N",
+        help="黑方 MCTS / MCTS-Minimax 的最大模拟次数；省略时 MCTS 默认 5000，MCTS-Minimax 默认 4000",
     )
 
     args = parser.parse_args()
@@ -95,13 +98,18 @@ if __name__ == "__main__":
     from chinese_chess.algorithm.mcts import MCTSAI
     from chinese_chess.algorithm.mcts_minimax import MCTSMinimaxAI
 
-    def build_agent(kind: str, *, depth: int, sims: int):
+    def _default_sims(kind: str, sims: Optional[int]) -> int:
+        if sims is not None:
+            return sims
+        return 4000 if kind == "mcts_minimax" else 5000
+
+    def build_agent(kind: str, *, depth: int, sims: Optional[int]):
         """根据玩家类型字符串构建对应的 AI 代理实例。
 
         Args:
             kind: 规范化后的玩家类型（``mcts_minimax``、``minimax`` 等）。
             depth: Minimax 搜索深度。
-            sims: MCTS / MCTS-Minimax 的 ``max_simulations``。
+            sims: MCTS / MCTS-Minimax 的 ``max_simulations``；``None`` 时按引擎类型取默认。
 
         Returns:
             AI 代理实例；若为 ``'human'`` 则返回 ``None``。
@@ -113,10 +121,14 @@ if __name__ == "__main__":
         if kind == "minimax":
             return MinimaxAI(depth=depth)
         if kind == "mcts":
-            return MCTSAI(time_limit=10.0, max_simulations=sims, verbose=False)
+            return MCTSAI(
+                time_limit=10.0,
+                max_simulations=_default_sims(kind, sims),
+                verbose=False,
+            )
         if kind == "mcts_minimax":
             return MCTSMinimaxAI(
-                max_simulations=sims,
+                max_simulations=_default_sims(kind, sims),
                 time_limit=10.0,
                 verbose=False,
             )
