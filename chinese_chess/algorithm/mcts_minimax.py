@@ -57,6 +57,7 @@ from .search_move_helpers import (
 )
 from .opening_book import OPENING_BOOK, mirror_move
 from .mcts import (
+    Move4,
     _append_path_move_entry,
     _policy_attack_bias,
     _order_untried_moves_policy,
@@ -147,13 +148,6 @@ _MAX_PROBE_NODES_PER_TREE = 25_000  # 每棵树 probe 节点数上限
 # ── 分级 probe 深度配置 ──
 _LIGHT_PROBE_DEPTH = 1       # Level 1 轻量 probe 主搜索深度
 _LIGHT_PROBE_QS_DEPTH = 2    # Level 1 轻量 probe 静止搜索深度
-
-# ═══════════════════════════════════════════════════════════════
-#  类型别名
-# ═══════════════════════════════════════════════════════════════
-
-Move4 = Tuple[int, int, int, int]
-
 
 # ═══════════════════════════════════════════════════════════════
 #  ProbeBudget —— per-tree probe 预算 / 冷却追踪器
@@ -264,13 +258,17 @@ class MCTSMinimaxNode:
         self,
         board: Board,
         gives_check_cache: Optional[MoveGivesCheckCache] = None,
+        *,
+        mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
     ) -> None:
         """惰性初始化 untried_moves。"""
         if self.untried_moves is None:
             self.untried_moves = list(
                 Rules.get_pseudo_legal_moves(board, board.current_player)
             )
-            _order_untried_moves_policy(board, self.untried_moves, gives_check_cache)
+            _order_untried_moves_policy(
+                board, self.untried_moves, gives_check_cache, mcts_gives=mcts_gives,
+            )
 
     def is_fully_expanded(self) -> bool:
         return self.untried_moves is not None and len(self.untried_moves) == 0
@@ -371,6 +369,7 @@ def _probe_order_moves(
     b = board.board
 
     mover = board.current_player
+    mcts_gives = probe_state.get("mcts_gives")
 
     def score(m: Move4) -> int:
         if tt_best_move is not None and m == tt_best_move:
@@ -391,7 +390,9 @@ def _probe_order_moves(
         elif m == k1:
             s += 4000
         if tt_best_move is None or m != tt_best_move:
-            if _move_gives_check(board, m, mover):
+            if _move_gives_check(
+                board, m, mover, None, mcts_gives=mcts_gives,
+            ):
                 s += _PROBE_ATTACK_BONUS_CHECK
             elif victim is None and _is_aggressive_push(board, mover, m, b):
                 s += _PROBE_ATTACK_BONUS_AGGRESSIVE
@@ -629,6 +630,7 @@ def _compute_probe_level(
     *,
     is_last_capture: bool = False,
     node_visits: int = 0,
+    mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
 ) -> int:
     """多因子评分式 probe 触发判定，返回 probe 等级 0 / 1 / 2。
 
@@ -682,7 +684,7 @@ def _compute_probe_level(
         score -= _COOLDOWN_PENALTY
 
     # ── 5b. 战术压力（将军机会 / 高价值吃子机会）→ 提高 probe 倾向，不改静态评估 ──
-    pressure = _tactical_pressure_bonus(board)
+    pressure = _tactical_pressure_bonus(board, mcts_gives=mcts_gives)
     if pressure >= 2:
         score += _SCORE_POLICY_PRESSURE
     elif pressure == 1:
@@ -705,14 +707,18 @@ def _compute_probe_level(
 # ═══════════════════════════════════════════════════════════════
 
 
-def _tactical_pressure_bonus(board: Board) -> int:
+def _tactical_pressure_bonus(
+    board: Board,
+    *,
+    mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
+) -> int:
     """O(伪合法着法数)：是否存在将军着法或高价值吃子（仅用于 probe 触发评分）。"""
     cp = board.current_player
     b = board.board
     pv = Evaluation.PIECE_VALUES
     hi_cap = False
     for m in Rules.get_pseudo_legal_moves(board, cp):
-        if _move_gives_check(board, m, cp):
+        if _move_gives_check(board, m, cp, None, mcts_gives=mcts_gives):
             return 2
         vic = b[m[2]][m[3]]
         if vic is not None and pv.get(vic.piece_type, 0) >= _POLICY_HVCAP_VALUE:
@@ -897,7 +903,11 @@ def _simulate_or_probe(
                 return (1.0 if cp == root_player else 0.0), red_moves, black_moves
 
         chosen, is_last_capture = _pick_rollout_move_fast(
-            sim_board, moves, b_grid, gives_check_cache=gives_check_cache,
+            sim_board,
+            moves,
+            b_grid,
+            gives_check_cache=gives_check_cache,
+            mcts_gives=probe_state.get("mcts_gives"),
         )
         _append_path_move_entry(hist, sim_board, chosen, cp)
         if cp == "red":
@@ -913,6 +923,7 @@ def _simulate_or_probe(
         sim_board, current_pc, budget, sims_done,
         is_last_capture=is_last_capture,
         node_visits=node_visits,
+        mcts_gives=probe_state.get("mcts_gives"),
     )
 
     if probe_level == 2:
@@ -1058,6 +1069,7 @@ def _run_single_mcts_minimax_tree(
 
     post_apply_cache = PostApplyFlagsCache(65536)
     gives_check_cache = MoveGivesCheckCache(131072, post_apply_cache=post_apply_cache)
+    mcts_gives: Dict[Tuple[int, Move4], Tuple[bool, bool]] = {}
     # 初始化 per-tree probe 状态（所有模拟共享，多进程天然隔离）
     probe_state: dict = {
         "tt": {},
@@ -1068,12 +1080,13 @@ def _run_single_mcts_minimax_tree(
         "budget": budget,
         "post_apply_cache": post_apply_cache,
         "pre_move_cache": gives_check_cache,
+        "mcts_gives": mcts_gives,
     }
 
     root_player = board.current_player
     opp_of_root = "black" if root_player == "red" else "red"
     root = MCTSMinimaxNode(state_hash=board.zobrist_hash, player_just_moved=opp_of_root)
-    root.ensure_moves(board, gives_check_cache)
+    root.ensure_moves(board, gives_check_cache, mcts_gives=mcts_gives)
 
     tt: Dict[int, MCTSMinimaxNode] = {root.state_hash: root}
     move_stack: List[Tuple[Move4, Any]] = []
@@ -1110,7 +1123,7 @@ def _run_single_mcts_minimax_tree(
             node = next_node
 
         # ── Expansion ──
-        node.ensure_moves(board, gives_check_cache)
+        node.ensure_moves(board, gives_check_cache, mcts_gives=mcts_gives)
         expanded = False
         if node.untried_moves:
             result = _expand_one(
@@ -1286,11 +1299,14 @@ class MCTSMinimaxAI:
         best_key = -1.0
         best_visits = -1
         best_wr = 0.0
+        root_bias_cache: Dict[Tuple[int, Move4], Tuple[bool, bool]] = {}
         for mv, st in child_stats.items():
             v = int(st["visits"])
             w = float(st["wins"])
             wr = w / v if v > 0 else 0.0
-            bias = _policy_attack_bias(board, root_player, mv)
+            bias = _policy_attack_bias(
+                board, root_player, mv, mcts_gives=root_bias_cache,
+            )
             close = min(1.0, v / max(v_max * _ROOT_VISITS_TIE_FRAC, 1e-6))
             key = v * 1_000_000.0 + w * 1_000.0 + bias * _ROOT_BIAS_SCALE * close
             if key > best_key:

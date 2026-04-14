@@ -52,6 +52,8 @@ from .search_move_helpers import (
     PostApplyFlagsCache,
     apply_pseudo_legal_with_rule_cache,
     fast_move_gives_check,
+    pseudo_move_post_apply_flags,
+    try_fast_move_legality_and_opponent_check,
 )
 from .opening_book import OPENING_BOOK, mirror_move
 
@@ -77,6 +79,9 @@ _POLICY_BIAS_AGGRESSIVE_PUSH_COMPONENT = 0.16
 # 选择阶段沿 DAG 下降的最大步数（防止局面环 + 全展开节点导致死循环）
 _SELECTION_MAX_PLIES = 512
 
+# MCTS 专用：轻量 dict 缓存 (zobrist, move) → (legal, opp_in_check)，满则 clear
+_MCTS_GIVES_CHECK_CAP = 200_000
+
 
 def _parallel_workers_when_safe(requested: int) -> int:
     """在非主线程（如 PyQt AI 后台线程）中禁用多进程根并行。
@@ -96,6 +101,41 @@ def _parallel_workers_when_safe(requested: int) -> int:
 
 # 走法四元组：(起始行, 起始列, 目标行, 目标列)
 Move4 = Tuple[int, int, int, int]
+
+
+def mcts_fast_move_gives_check(
+    board: Board,
+    move: Move4,
+    mover: str,
+    mcts_cache: Dict[Tuple[int, Move4], Tuple[bool, bool]],
+) -> bool:
+    """MCTS 专用：是否对对方将军（非法则 False）。
+
+    先查 ``mcts_cache``，再 ``try_fast_move_legality_and_opponent_check``（无 apply），
+    失败则 ``apply`` + ``pseudo_move_post_apply_flags`` 后 undo，并写回缓存。
+    满 ``_MCTS_GIVES_CHECK_CAP`` 时整表 ``clear()``（非 LRU，仅服务单棵树搜索）。
+    """
+    key = (board.zobrist_hash, move)
+    hit = mcts_cache.get(key)
+    if hit is not None:
+        legal, gc = hit
+        return gc if legal else False
+    res = try_fast_move_legality_and_opponent_check(board, move, mover)
+    if res is not None:
+        legal, gc = res
+        if len(mcts_cache) >= _MCTS_GIVES_CHECK_CAP:
+            mcts_cache.clear()
+        mcts_cache[key] = (legal, gc)
+        return gc if legal else False
+    captured = board.apply_move(*move)
+    try:
+        legal, gc = pseudo_move_post_apply_flags(board, mover)
+    finally:
+        board.undo_move(*move, captured)
+    if len(mcts_cache) >= _MCTS_GIVES_CHECK_CAP:
+        mcts_cache.clear()
+    mcts_cache[key] = (legal, gc)
+    return gc if legal else False
 
 
 def _append_path_move_entry(
@@ -118,8 +158,17 @@ def _move_gives_check(
     move: Move4,
     mover: str,
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
+    *,
+    mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
 ) -> bool:
-    """走法是否对对方将军（非法则 False）。虚拟几何 + LRU + fallback。"""
+    """走法是否对对方将军（非法则 False）。
+
+    若传入 ``mcts_gives``（仅 MCTS / MCTS-Minimax 树内使用），走 MCTS 轻量缓存 +
+    ``try_fast`` 路径，不经过 ``MoveGivesCheckCache`` LRU。未传入时行为与原先一致
+    （``fast_move_gives_check``），Minimax 等调用方不受影响。
+    """
+    if mcts_gives is not None:
+        return mcts_fast_move_gives_check(board, move, mover, mcts_gives)
     return fast_move_gives_check(board, move, mover, gives_check_cache)
 
 
@@ -147,11 +196,13 @@ def _is_forcing_move(
     m: Move4,
     b_grid,
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
+    *,
+    mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
 ) -> bool:
     """将军或吃子（不含完整局面评估）。"""
     if b_grid[m[2]][m[3]] is not None:
         return True
-    return _move_gives_check(board, m, mover, gives_check_cache)
+    return _move_gives_check(board, m, mover, gives_check_cache, mcts_gives=mcts_gives)
 
 
 def _policy_attack_bias(
@@ -159,6 +210,8 @@ def _policy_attack_bias(
     mover: str,
     m: Move4,
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
+    *,
+    mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
 ) -> float:
     """根节点 tie-break 用轻量偏置，约 0~1.5，仅供 policy，不写入静态值。"""
     b = board.board
@@ -168,7 +221,7 @@ def _policy_attack_bias(
     if victim is not None and victim.piece_type != "jiang":
         bias += min(1.0, float(pv.get(victim.piece_type, 0)) / 900.0)
     if victim is None or victim.piece_type != "jiang":
-        if _move_gives_check(board, m, mover, gives_check_cache):
+        if _move_gives_check(board, m, mover, gives_check_cache, mcts_gives=mcts_gives):
             bias += _POLICY_BIAS_CHECK_COMPONENT
     if _is_aggressive_push(board, mover, m, b):
         bias += _POLICY_BIAS_AGGRESSIVE_PUSH_COMPONENT
@@ -179,6 +232,8 @@ def _order_untried_moves_policy(
     board: Board,
     moves: List[Move4],
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
+    *,
+    mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
 ) -> None:
     """展开顺序：低优先在前、高优先在尾（pop 先展高优先）；组内随机。"""
     if not moves:
@@ -196,14 +251,14 @@ def _order_untried_moves_policy(
         if victim is not None and victim.piece_type == "jiang":
             tier_check.append(m)
             continue
-        if _move_gives_check(board, m, mover, gives_check_cache):
-            tier_check.append(m)
-            continue
         if victim is not None:
             if pv.get(victim.piece_type, 0) >= _POLICY_HVCAP_VALUE:
                 tier_hvcap.append(m)
             else:
                 tier_cap.append(m)
+            continue
+        if _move_gives_check(board, m, mover, gives_check_cache, mcts_gives=mcts_gives):
+            tier_check.append(m)
             continue
         if _is_aggressive_push(board, mover, m, b):
             tier_agg.append(m)
@@ -297,6 +352,8 @@ class MCTSNode:
         self,
         board: Board,
         gives_check_cache: Optional[MoveGivesCheckCache] = None,
+        *,
+        mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
     ) -> None:
         """惰性初始化 ``untried_moves``（仅首次调用时生成走法列表）。
 
@@ -305,13 +362,16 @@ class MCTSNode:
 
         Args:
             board: 当前棋盘状态（必须与本节点对应的局面一致）。
-            gives_check_cache: 可选；与本棵搜索树共用，加速 ``_move_gives_check``。
+            gives_check_cache: 可选；供 ``apply_pseudo_legal_with_rule_cache`` 的 LRU。
+            mcts_gives: 可选；MCTS 专用将军判定 dict，见 ``mcts_fast_move_gives_check``。
         """
         if self.untried_moves is None:
             self.untried_moves = list(
                 Rules.get_pseudo_legal_moves(board, board.current_player)
             )
-            _order_untried_moves_policy(board, self.untried_moves, gives_check_cache)
+            _order_untried_moves_policy(
+                board, self.untried_moves, gives_check_cache, mcts_gives=mcts_gives,
+            )
 
     def is_fully_expanded(self) -> bool:
         """判断该节点是否已完全展开（所有候选走法都已尝试过）。
@@ -421,7 +481,8 @@ def _run_single_mcts_tree(
     root = MCTSNode(state_hash=board.zobrist_hash, player_just_moved=opp_of_root)
     post_apply_cache = PostApplyFlagsCache()
     gives_check_cache = MoveGivesCheckCache(post_apply_cache=post_apply_cache)
-    root.ensure_moves(board, gives_check_cache)
+    mcts_gives: Dict[Tuple[int, Move4], Tuple[bool, bool]] = {}
+    root.ensure_moves(board, gives_check_cache, mcts_gives=mcts_gives)
 
     # 局部置换表：Zobrist Hash → MCTSNode，用于 DAG 合并
     tt: Dict[int, MCTSNode] = {root.state_hash: root}
@@ -465,7 +526,7 @@ def _run_single_mcts_tree(
 
         # ── 展开 (Expansion) ──
         # 从当前节点的 untried_moves 中弹出一个合法走法，创建（或复用）子节点。
-        node.ensure_moves(board, gives_check_cache)
+        node.ensure_moves(board, gives_check_cache, mcts_gives=mcts_gives)
         expanded = False
         if node.untried_moves:
             result = _expand_one(
@@ -492,6 +553,7 @@ def _run_single_mcts_tree(
                 root_player,
                 gives_check_cache=gives_check_cache,
                 path_history=entry_stack,
+                mcts_gives=mcts_gives,
             )
 
         # ── 反向传播 (Backpropagation) ──
@@ -588,6 +650,7 @@ def _simulate(
     *,
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
     path_history: Optional[List[MoveEntry]] = None,
+    mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
 ) -> Tuple[float, Set[Move4], Set[Move4]]:
     """轻量级伪合法模拟（Lightweight Pseudo-legal Rollout）。
 
@@ -608,7 +671,8 @@ def _simulate(
     Args:
         board: 当前棋盘（会被 copy 后在副本上模拟，不影响原盘）。
         root_player: MCTS 搜索的根节点行棋方（用于确定胜负视角）。
-        gives_check_cache: 可选；与当前搜索树共用，加速 rollout 内 ``_move_gives_check``。
+        gives_check_cache: 可选；与当前搜索树共用（apply 路径 LRU）。
+        mcts_gives: 可选；rollout 内将军判定专用 dict。
         path_history: 到达当前节点前的 ``MoveEntry`` 链（与 ``board`` 一致）。
 
     Returns:
@@ -667,7 +731,11 @@ def _simulate(
 
         # 启发式走子：policy 层 forcing-first，非法由下一步 O(1) 终局检测兜底
         chosen, _ = _pick_rollout_move_fast(
-            sim_board, moves, b_grid, gives_check_cache=gives_check_cache,
+            sim_board,
+            moves,
+            b_grid,
+            gives_check_cache=gives_check_cache,
+            mcts_gives=mcts_gives,
         )
         # ``_pick_rollout_move_fast`` 内部已 ``apply_move``
         _append_path_move_entry(hist, sim_board, chosen, cp)
@@ -758,10 +826,12 @@ def _pick_rollout_move_fast(
     b_grid,
     *,
     gives_check_cache: Optional[MoveGivesCheckCache] = None,
+    mcts_gives: Optional[Dict[Tuple[int, Move4], Tuple[bool, bool]]] = None,
 ) -> Tuple[Move4, bool]:
     """分级 forcing-first rollout：将 / 将军 / 高价值吃子 / 吃子 / 推进 / 随机。
 
-    不调用 ``Evaluation.evaluate``；吃子价值仅用 ``Evaluation.PIECE_VALUES``。
+    吃子按子力分档不调用将军判定；仅对**非吃子**着法调用 ``mcts_fast`` / LRU，
+    减少 rollout 内 ``_move_gives_check`` 次数。不调用 ``Evaluation.evaluate``。
     返回 ``(move, 是否为吃子)``，后者供 ``mcts_minimax`` 模块中 probe 触发等逻辑使用。
     """
     cp = sim_board.current_player
@@ -777,17 +847,22 @@ def _pick_rollout_move_fast(
             was_cap = True
             sim_board.apply_move(*m)
             return m, was_cap
-        if _move_gives_check(sim_board, m, cp, gives_check_cache):
-            checking.append(m)
-            continue
         if victim is not None:
             if pv.get(victim.piece_type, 0) >= _POLICY_HVCAP_VALUE:
                 hv_caps.append(m)
             else:
                 lv_caps.append(m)
             continue
-        if _is_aggressive_push(sim_board, cp, m, b_grid):
-            aggressive.append(m)
+        if mcts_gives is not None:
+            if mcts_fast_move_gives_check(sim_board, m, cp, mcts_gives):
+                checking.append(m)
+            elif _is_aggressive_push(sim_board, cp, m, b_grid):
+                aggressive.append(m)
+        else:
+            if _move_gives_check(sim_board, m, cp, gives_check_cache):
+                checking.append(m)
+            elif _is_aggressive_push(sim_board, cp, m, b_grid):
+                aggressive.append(m)
 
     m_pick: Optional[Move4] = None
     if checking and random.random() < _ROLL_PREFER_CHECK:
@@ -1040,11 +1115,14 @@ class MCTSAI:
         best_key = -1.0
         best_visits = -1
         best_wr = 0.0
+        root_bias_cache: Dict[Tuple[int, Move4], Tuple[bool, bool]] = {}
         for mv, st in merged.items():
             v = int(st["visits"])
             w = float(st["wins"])
             wr = w / v if v > 0 else 0.0
-            bias = _policy_attack_bias(board, root_player, mv)
+            bias = _policy_attack_bias(
+                board, root_player, mv, mcts_gives=root_bias_cache,
+            )
             close = min(
                 1.0,
                 v / max(v_max * _ROOT_VISITS_TIE_FRAC, 1e-6),
