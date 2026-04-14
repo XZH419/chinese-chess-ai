@@ -1,10 +1,11 @@
-"""性能预测试（Profiling）——用于后续实验定标。
+"""性能预测试（Profiling）——为后续对弈实验“定标”参数与预算。
 
 目标：
 - 尽量减少观察者效应（Observer Effect）
 - 使用固定“中局局面”作为输入，避免开局库干扰
-- 对 Minimax / MCTS / MCTS-Minimax 采集吞吐量与耗时指标
-- 3~5 次重复取中位数，输出轻量 Markdown 表格 + 建议参数（≈3.0 秒/步）
+- 对 Minimax / MCTS 采集吞吐量与耗时指标
+- 3~5 次重复取中位数，输出轻量 Markdown 表格
+- 给 `infra.experiment_runner` 提供“每步 time_limit + 保险的 max_simulations”建议
 
 运行方式（Windows/conda/venv 均可）：
 
@@ -22,7 +23,6 @@ import io
 import os
 import statistics
 import time
-from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ai.mcts_ai import MCTSAI
@@ -100,12 +100,6 @@ def _root_move_history_for(board: Board) -> List[MoveEntry]:
 # ──────────────────────────────────────────────────────────────
 
 
-@dataclass(frozen=True, slots=True)
-class Sample:
-    seconds: float
-    metric_value: Optional[float] = None  # nodes 或 sims
-
-
 def _median(values: Sequence[float]) -> float:
     return float(statistics.median(values))
 
@@ -155,7 +149,13 @@ def _measure_minimax(depth: int, board: Board) -> Tuple[float, float]:
         ai = _mk()
         with _silence_output():
             t0 = time.perf_counter()
-            ai.get_best_move(board.copy(), time_limit=None, game_history=gh, move_history=mh)
+            # 使用“无时间限制”测一次，得到该深度的真实耗时与节点吞吐
+            ai.get_best_move(
+                board.copy(),
+                time_limit=None,
+                game_history=gh,
+                move_history=mh,
+            )
             dt = time.perf_counter() - t0
         stats = getattr(ai, "last_stats", None) or {}
         nodes = stats.get("nodes_evaluated")
@@ -189,7 +189,7 @@ def _measure_mcts_like(
             t0 = time.perf_counter()
             ai.get_best_move(
                 board.copy(),
-                time_limit=999.0,  # 以 simulations 为主，避免提前 time-limit
+                time_limit=999.0,  # 用 sims 定标吞吐；避免提前 time-limit
                 game_history=gh,
                 move_history=mh,
             )
@@ -223,8 +223,9 @@ def _fmt_float(x: float, digits: int = 3) -> str:
     return f"{x:.{digits}f}"
 
 
-def _suggest_simulations(sps: float, target_seconds: float = 3.0) -> int:
-    return max(100, int(sps * target_seconds))
+def _suggest_simulations(sps: float, time_limit_s: float, safety: float = 1.5) -> int:
+    """给 time-limit 实验准备一个“不会先被 sims 卡住”的 max_simulations。"""
+    return max(200, int(sps * time_limit_s * safety))
 
 
 def _suggest_depth(minimax_rows: List[Tuple[int, float]]) -> int:
@@ -250,7 +251,7 @@ def main() -> None:
 
     rows: List[Dict[str, Any]] = []
 
-    # Minimax：D in {3,4,5}
+    # Minimax：D in {3,4,5}（你也可以按需扩展）
     minimax_rows: List[Tuple[int, float]] = []
     for d in (3, 4, 5):
         gc.collect()
@@ -308,19 +309,22 @@ def main() -> None:
 
     print()
 
-    # 参数建议（≈3 秒/步）
+    # ── 实验参数建议（为 experiment_runner 服务） ──
+    # 推荐用“固定每步 time_limit”做对弈公平对比；max_simulations 只作为兜底上限
+    budget_s = 0.50
     suggested_depth = _suggest_depth(minimax_rows)
-    print(f"- **建议 MinimaxAI 深度**：`depth={suggested_depth}`（目标≈3.0s/步）")
+    print(f"- **建议对弈 time_limit**：每步 `time_limit={budget_s:.2f}s`（公平对比用）")
+    print(f"- **建议 MinimaxAI 深度**：`depth={suggested_depth}`（接近中局单步耗时基准）")
 
-    # 对 MCTS 系列，用 workers=max 的吞吐推算 3 秒模拟次数
-    # 从 rows 中提取 workers=max 的 sps（字符串解析即可）
     mcts_sps_max = None
     for r in rows:
         if r["AI"] == "MCTSAI" and r["Config"] == f"sims={sims}, workers={wmax}":
             mcts_sps_max = float(r["Throughput"].split()[0].replace(",", ""))
-
     if mcts_sps_max is not None:
-        print(f"- **建议 MCTSAI 模拟次数**：`max_simulations≈{_suggest_simulations(mcts_sps_max):d}`（workers={wmax}，目标≈3.0s/步）")
+        rec = _suggest_simulations(mcts_sps_max, budget_s, safety=1.8)
+        print(
+            f"- **建议 MCTSAI 上限模拟次数**：`max_simulations≈{rec:d}`（workers={wmax}，主要由 time_limit 控制，sims 仅防极端情况）"
+        )
 
 
 if __name__ == "__main__":

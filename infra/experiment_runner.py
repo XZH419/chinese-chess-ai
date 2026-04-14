@@ -1,4 +1,4 @@
-"""对弈实验数据采集脚本（多轮次、自动换先）。
+"""对弈实验数据采集脚本（多轮次、自动换先、固定预算）。
 
 运行：
 
@@ -6,21 +6,28 @@
 python -m infra.experiment_runner
 ```
 
-输出：
-- `raw_data.csv`：逐局原始数据（便于绘图）
-- `summary_report.txt`：汇总统计（胜率/回合数/耗时）
+输出（默认输出到 `runs/<timestamp>/`）：
+- `raw_games.csv`：逐局原始数据（便于绘图）
+- `summary_report.txt`：汇总统计（胜率/回合数/耗时/错误）
+
+说明：
+- 本脚本仅保留 **calibrated** 公平性策略：先测 Minimax(depth=K) 的真实每步耗时中位数，
+  再把 MCTS 的 `time_limit` 设为该中位数，使两者总时间预算对齐（无需修改 Minimax 实现）。
+- 通过固定 seed + 固定起始局面（可选 midgame）提升可复现性。
 """
 
 from __future__ import annotations
 
-import csv
-import gc
-import os
-import time
-import traceback
+import argparse
 import builtins
 import contextlib
+import csv
+import gc
 import io
+import os
+import random
+import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -109,23 +116,91 @@ class GameResult:
     black_avg_time_s: float
     material_diff: int
     error: str = ""
+    start_kind: str = "initial"  # initial|midgame
 
 
-def _pick_move(agent: Any, board: Board, *, game_history: List[int], move_history: List[MoveEntry]) -> Optional[Move4]:
+def _pick_move(
+    agent: Any,
+    board: Board,
+    *,
+    time_limit_s: Optional[float],
+    game_history: List[int],
+    move_history: List[MoveEntry],
+) -> Optional[Move4]:
     """统一调用 AI 的 move 接口（choose_move / get_best_move）。"""
     if hasattr(agent, "choose_move"):
         return agent.choose_move(
             board,
-            time_limit=None,
+            time_limit=time_limit_s,
             game_history=game_history,
             move_history=move_history,
         )
     return agent.get_best_move(
         board,
-        time_limit=None,
+        time_limit=time_limit_s,
         game_history=game_history,
         move_history=move_history,
     )
+
+
+def build_midgame_board(plies: int = 18) -> Board:
+    """确定性地从初始局面推进到一个中局局面（避免开局库/开局走法偏差）。"""
+    b = Board()
+    for _ in range(int(plies)):
+        legal = Rules.get_legal_moves(b, b.current_player)
+        if not legal:
+            break
+        captures = [m for m in legal if b.board[m[2]][m[3]] is not None]
+        m = sorted(captures or legal)[0]
+        b.apply_move(*m)
+    return b
+
+
+def _median(xs: List[float]) -> float:
+    xs2 = sorted(float(x) for x in xs)
+    n = len(xs2)
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    return xs2[mid] if (n % 2 == 1) else (xs2[mid - 1] + xs2[mid]) / 2.0
+
+
+def calibrate_minimax_seconds_per_move(
+    *,
+    depth: int,
+    start_kind: str,
+    start_midgame_plies: int,
+    samples: int = 5,
+) -> float:
+    """不修改 Minimax 的前提下，测一个“该深度的真实每步耗时”中位数。
+
+    用于 `--fairness calibrated`：让 MCTS 的 time_limit 贴近 Minimax(depth=K) 的真实耗时，
+    避免因 Minimax 的 time_limit 行为差异导致对比失真。
+    """
+    board = Board() if start_kind == "initial" else build_midgame_board(plies=start_midgame_plies)
+    history: List[MoveEntry] = [MoveEntry(pos_hash=board.zobrist_hash)]
+    gh: List[int] = list(OPENING_BOOK_BYPASS_HISTORY) + [board.zobrist_hash]
+    ai = MinimaxAI(depth=int(depth))
+
+    times: List[float] = []
+    # 取多个不同的局面点：每次选一步，然后推进一步（用合法走法的稳定选择）
+    for _ in range(max(1, int(samples))):
+        with _silence_output():
+            t0 = time.perf_counter()
+            _ = ai.get_best_move(board.copy(), time_limit=None, game_history=gh, move_history=history)
+            dt = time.perf_counter() - t0
+        times.append(dt)
+
+        legal = Rules.get_legal_moves(board, board.current_player, history=history)
+        if not legal:
+            break
+        mv = sorted(legal)[0]
+        mover = board.current_player
+        _ = board.apply_move(*mv)
+        _append_history_entry(history, board, mv, mover)
+        gh.append(board.zobrist_hash)
+
+    return max(0.01, float(_median(times)))
 
 
 def run_single_game(
@@ -134,10 +209,13 @@ def run_single_game(
     game_index: int,
     red_agent: Any,
     black_agent: Any,
+    time_limit_s: Optional[float],
+    start_kind: str = "initial",
+    start_midgame_plies: int = 18,
 ) -> GameResult:
     """运行一局对弈，返回逐局统计。"""
 
-    board = Board()
+    board = Board() if start_kind == "initial" else build_midgame_board(plies=start_midgame_plies)
     history: List[MoveEntry] = [MoveEntry(pos_hash=board.zobrist_hash)]
     # 确保开局库永远不触发：先填充 30 个占位，再追加真实哈希
     game_hash_history: List[int] = list(OPENING_BOOK_BYPASS_HISTORY) + [board.zobrist_hash]
@@ -164,6 +242,7 @@ def run_single_game(
                     red_avg_time_s=(red_time / red_moves) if red_moves else 0.0,
                     black_avg_time_s=(black_time / black_moves) if black_moves else 0.0,
                     material_diff=_material_diff(board),
+                    start_kind=start_kind,
                 )
 
             side = board.current_player
@@ -173,7 +252,13 @@ def run_single_game(
 
             with _silence_output():
                 t0 = time.perf_counter()
-                move = _pick_move(agent, board, game_history=game_hash_history, move_history=history)
+                move = _pick_move(
+                    agent,
+                    board,
+                    time_limit_s=time_limit_s,
+                    game_history=game_hash_history,
+                    move_history=history,
+                )
                 dt = time.perf_counter() - t0
 
             if side == "red":
@@ -199,6 +284,7 @@ def run_single_game(
                     red_avg_time_s=(red_time / red_moves) if red_moves else 0.0,
                     black_avg_time_s=(black_time / black_moves) if black_moves else 0.0,
                     material_diff=_material_diff(board),
+                    start_kind=start_kind,
                 )
 
             sr, sc, er, ec = move
@@ -230,6 +316,7 @@ def run_single_game(
                         black_avg_time_s=(black_time / black_moves) if black_moves else 0.0,
                         material_diff=_material_diff(board),
                         error=f"illegal_move_from_{_agent_name(agent)}: {move} ({reason})",
+                        start_kind=start_kind,
                     )
                 move = legal[0]
 
@@ -251,6 +338,7 @@ def run_single_game(
             red_avg_time_s=(red_time / red_moves) if red_moves else 0.0,
             black_avg_time_s=(black_time / black_moves) if black_moves else 0.0,
             material_diff=_material_diff(board),
+            start_kind=start_kind,
         )
     except Exception as e:
         return GameResult(
@@ -266,10 +354,20 @@ def run_single_game(
             black_avg_time_s=(black_time / black_moves) if black_moves else 0.0,
             material_diff=_material_diff(board),
             error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
+            start_kind=start_kind,
         )
 
 
-def run_match(ai_red: Any, ai_black: Any, *, rounds: int = 10, experiment: str = "") -> List[GameResult]:
+def run_match(
+    ai_red: Any,
+    ai_black: Any,
+    *,
+    rounds: int,
+    experiment: str,
+    time_limit_s: Optional[float],
+    start_kind: str,
+    start_midgame_plies: int,
+) -> List[GameResult]:
     """批量对局并自动换先（每局交换红黑）。"""
 
     results: List[GameResult] = []
@@ -285,6 +383,9 @@ def run_match(ai_red: Any, ai_black: Any, *, rounds: int = 10, experiment: str =
             game_index=i + 1,
             red_agent=red,
             black_agent=black,
+            time_limit_s=time_limit_s,
+            start_kind=start_kind,
+            start_midgame_plies=start_midgame_plies,
         )
         results.append(res)
 
@@ -307,6 +408,7 @@ def _write_raw_csv(path: Path, results: List[GameResult]) -> None:
         "red_avg_time_s",
         "black_avg_time_s",
         "material_diff",
+        "start_kind",
         "error",
     ]
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -361,38 +463,127 @@ def _summarize(results: List[GameResult]) -> str:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="中国象棋 AI 对弈实验采集脚本")
+    parser.add_argument("--rounds", type=int, default=10, help="每个实验的对局数（自动换先，默认 10）")
+    parser.add_argument(
+        "--minimax-depth",
+        type=int,
+        default=4,
+        help="Minimax 深度（默认 4；将用于校准真实每步耗时）",
+    )
+    parser.add_argument(
+        "--calib-samples",
+        type=int,
+        default=5,
+        help="校准阶段：测 Minimax 每步耗时的样本数（默认 5）",
+    )
+    parser.add_argument("--max-plies", type=int, default=200, help="单局最大半回合数（默认 200）")
+    parser.add_argument("--seed", type=int, default=0, help="随机种子（默认 0）")
+    parser.add_argument(
+        "--start",
+        choices=["initial", "midgame"],
+        default="midgame",
+        help="起始局面：initial=开局，midgame=固定中局（默认 midgame）",
+    )
+    parser.add_argument("--midgame-plies", type=int, default=18, help="midgame 推进半回合数（默认 18）")
+    parser.add_argument("--out", type=str, default="", help="输出目录（默认 runs/<timestamp>/）")
+    args = parser.parse_args()
+
     # 关闭并行 worker 的观测日志（如需观察可手动 export CHESSAI_PARALLEL_LOG=1）
     os.environ.pop("CHESSAI_PARALLEL_LOG", None)
 
+    global MAX_PLIES_PER_GAME
+    MAX_PLIES_PER_GAME = int(args.max_plies)
+    random.seed(int(args.seed))
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    out_dir = Path(args.out) if args.out else Path("runs") / ts
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    rounds = max(2, int(args.rounds))
+    start_kind = str(args.start)
+    midgame_plies = int(args.midgame_plies)
+    mm_depth = int(args.minimax_depth)
+
+    mm_median = calibrate_minimax_seconds_per_move(
+        depth=mm_depth,
+        start_kind=start_kind,
+        start_midgame_plies=midgame_plies,
+        samples=int(args.calib_samples),
+    )
+    # 让 MCTS 用 Minimax 的真实中位数做 time_limit；Minimax 固定深度，不传 time_limit
+    mcts_time_limit_s = mm_median
+
+    # ── 实验设计（当前项目适配版） ──
+    # E1: 随机基线（验证规则/runner 稳定）
+    # E2: Minimax vs Random（检验确定性搜索基本有效性）
+    # E3: MCTS vs Random（检验采样搜索基本有效性）
+    # E4: Minimax vs MCTS（核心对比：同一 time_limit 下的强度）
+    #
+    # 所有实验均使用同一 per-move time_limit 以保证公平；MCTS 设置一个“足够高”的 max_simulations 作为兜底。
+    workers = _safe_workers(8)
+    mcts_max_sims = 200000  # 主要由 time_limit 控制；上限只用于防止极端情况下过早耗尽
+
     results: List[GameResult] = []
 
-    # 实验 A：MinimaxAI(D=5) vs RandomAI，共 4 局
-    a1 = MinimaxAI(depth=5)
-    a2 = RandomAI()
-    results += run_match(a1, a2, rounds=4, experiment="A: MinimaxAI(depth=5) vs RandomAI")
-
-    # 实验 B：MinimaxAI(D=5) vs MCTSAI(sims=8000, workers=8)，共 10 局（可自行改为 20）
-    b1 = MinimaxAI(depth=5)
-    b2 = MCTSAI(max_simulations=8000, time_limit=999.0, workers=_safe_workers(8), verbose=False)
+    e1a, e1b = RandomAI(), RandomAI()
     results += run_match(
-        b1,
-        b2,
-        rounds=10,
-        experiment="B: MinimaxAI(depth=5) vs MCTSAI(sims=8000, workers=8)",
+        e1a,
+        e1b,
+        rounds=rounds,
+        experiment=f"E1: RandomAI vs RandomAI | start={start_kind}",
+        time_limit_s=None,
+        start_kind=start_kind,
+        start_midgame_plies=midgame_plies,
     )
 
-    # 实验 C：MCTSAI(sims=8000, workers=8) vs MCTSAI(sims=8000, workers=8)，共 10 局（可自行改为 20）
-    c1 = MCTSAI(max_simulations=8000, time_limit=999.0, workers=_safe_workers(8), verbose=False)
-    c2 = MCTSAI(max_simulations=8000, time_limit=999.0, workers=_safe_workers(8), verbose=False)
+    e2a, e2b = MinimaxAI(depth=mm_depth), RandomAI()
     results += run_match(
-        c1,
-        c2,
-        rounds=10,
-        experiment="C: MCTSAI(sims=8000, workers=8) vs MCTSAI(sims=8000, workers=8)",
+        e2a,
+        e2b,
+        rounds=rounds,
+        experiment=f"E2: MinimaxAI(depth={mm_depth}) vs RandomAI | calib_median={mm_median:.3f}s | start={start_kind}",
+        time_limit_s=None,
+        start_kind=start_kind,
+        start_midgame_plies=midgame_plies,
     )
 
-    out_csv = Path("raw_data.csv")
-    out_txt = Path("summary_report.txt")
+    e3a = MCTSAI(
+        max_simulations=mcts_max_sims,
+        time_limit=mcts_time_limit_s,
+        workers=workers,
+        verbose=False,
+    )
+    e3b = RandomAI()
+    results += run_match(
+        e3a,
+        e3b,
+        rounds=rounds,
+        experiment=f"E3: MCTSAI(workers={workers}) vs RandomAI | tl={mcts_time_limit_s:.3f}s | start={start_kind}",
+        time_limit_s=mcts_time_limit_s,
+        start_kind=start_kind,
+        start_midgame_plies=midgame_plies,
+    )
+
+    e4a = MinimaxAI(depth=mm_depth)
+    e4b = MCTSAI(
+        max_simulations=mcts_max_sims,
+        time_limit=mcts_time_limit_s,
+        workers=workers,
+        verbose=False,
+    )
+    results += run_match(
+        e4a,
+        e4b,
+        rounds=rounds,
+        experiment=f"E4: MinimaxAI(depth={mm_depth}) vs MCTSAI(workers={workers}) | tl={mcts_time_limit_s:.3f}s | start={start_kind}",
+        time_limit_s=None,
+        start_kind=start_kind,
+        start_midgame_plies=midgame_plies,
+    )
+
+    out_csv = out_dir / "raw_games.csv"
+    out_txt = out_dir / "summary_report.txt"
     _write_raw_csv(out_csv, results)
     out_txt.write_text(_summarize(results), encoding="utf-8")
 
