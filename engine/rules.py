@@ -145,8 +145,9 @@ class Rules:
         - 统计 ``history`` 中 ``pos_hash ==`` 当前局面 Zobrist 的次数 ``c``。
         - 取上一次同形下标 ``j``，循环节 ``history[j+1:]``；若节内仅一方
           行棋且节节将军，则该方为 ``offending_side``。
-        - ``c == 1`` → ``("none", None)``；``c == 2`` 且满足上式 → ``warning``；
-          ``c >= 3`` 且满足 → ``forfeit``。
+        - ``c == 1`` → ``("none", None)``；``c == 2`` 且满足上式且**本手为长将方**
+          所走 → ``warning``（被将军方被迫走回同形局面不构成第二次同形警告）；
+          ``c >= 3`` 且满足 → ``forfeit``（任一方走出第三次同形均可判负）。
 
         Returns:
             ``("none" | "warning" | "forfeit", offending_side | None)``。
@@ -167,7 +168,10 @@ class Rules:
         off = Rules._perpetual_offending_side_in_cycle(cycle)
         if off is None:
             return "none", None
+        last_mover = history[-1].mover
         if c == 2:
+            if last_mover is None or last_mover != off:
+                return "none", None
             return "warning", off
         return "forfeit", off
 

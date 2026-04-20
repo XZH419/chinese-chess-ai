@@ -884,6 +884,18 @@ class MainWindow(QMainWindow):
 
     # ────────────────────── 游戏内逻辑 ──────────────────────
 
+    def _show_perpetual_warning_dialog(self, off: str) -> None:
+        """长将第二次同形警告弹窗与日志（off 为长将方 ``'red'`` / ``'black'``）。
+
+        每局次数上限由 ``GameController.MAX_PERPETUAL_WARNINGS_PER_GAME`` 与
+        ``apply_move`` 统一控制。
+        """
+        who = "红方" if off == "red" else "黑方"
+        wtxt = f"长将警告：{who}持续将军；第三次出现相同局面将判负。"
+        self.append_log(f"⚠ {wtxt}")
+        self.status_label.setText(f"⚠ {wtxt}")
+        QMessageBox.warning(self, "长将警告", wtxt)
+
     def _finalize_after_legal_move(self, outcome: MoveOutcome) -> None:
         """合法走子后的统一收尾处理：刷新状态、检测终局、触发下一轮 AI。
 
@@ -895,11 +907,8 @@ class MainWindow(QMainWindow):
         self._refresh_status()
         if outcome.perpetual_warning and not outcome.game_over:
             off = outcome.perpetual_offender
-            who = "红方" if off == "red" else "黑方" if off else "某方"
-            wtxt = f"长将警告：{who}持续将军；第三次出现相同局面将判负。"
-            self.append_log(f"⚠ {wtxt}")
-            self.status_label.setText(f"⚠ {wtxt}")
-            QMessageBox.warning(self, "长将警告", wtxt)
+            if off:
+                self._show_perpetual_warning_dialog(off)
 
         if outcome.game_over:
             self._run_id += 1

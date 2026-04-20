@@ -125,7 +125,8 @@ class MoveOutcome:
         captured: 本步吃掉的棋子对象，未吃子则为 ``None``。
         game_over: 仅当 ``ok=True`` 时有意义——本步执行后局面是否已终局。
         winner: 终局时的胜者颜色（``'red'`` / ``'black'``），和棋时为 ``None``。
-        perpetual_warning: 本步后触发长将第二次同形警告（对局继续）。
+        perpetual_warning: 本步后规则层为长将「第二次同形」警告（须为长将方走出同形，
+            且未超本局 ``GameController.MAX_PERPETUAL_WARNINGS_PER_GAME`` 次数上限）。
         perpetual_forfeit: 本步后长将第三次判负导致终局。
         perpetual_offender: 长将方颜色（``warning`` / ``forfeit`` 时有效）。
         move_limit_draw: 本步后达到限着手数（``Rules.MAX_PLIES_AUTODRAW``）和棋。
@@ -154,7 +155,15 @@ class GameController:
         red_agent: 红方 AI 代理，``None`` 表示人类操控。
         black_agent: 黑方 AI 代理，``None`` 表示人类操控。
         history: 完整对局历史记录列表。
+
+    Note:
+        「第二次同形」是否构成 ``warning`` 由 ``Rules.perpetual_check_status`` 决定（须为
+        长将方走出）。本控制器对界面「长将警告」另设 ``MAX_PERPETUAL_WARNINGS_PER_GAME``
+        按局累计上限；判负逻辑不受影响。
     """
+
+    #: 每局长将警告（含延后到长将方回合的那次）最多触发次数
+    MAX_PERPETUAL_WARNINGS_PER_GAME = 3
 
     def __init__(
         self,
@@ -179,6 +188,7 @@ class GameController:
         self.history: List[MoveEntry] = [
             MoveEntry(pos_hash=self.board.zobrist_hash)
         ]
+        self._perpetual_warning_shown_count: int = 0
 
     def agent_for(self, color: str):
         """获取指定颜色方的 AI 代理。
@@ -278,7 +288,12 @@ class GameController:
             )
         )
         pst, poff = Rules.perpetual_check_status(self.board, self.history)
-        p_warn = pst == "warning"
+        cap = self.MAX_PERPETUAL_WARNINGS_PER_GAME
+        if pst == "warning" and self._perpetual_warning_shown_count < cap:
+            p_warn = True
+            self._perpetual_warning_shown_count += 1
+        else:
+            p_warn = False
         p_ff = pst == "forfeit"
         mld = Rules.is_move_limit_draw(self.history)
         over = Rules.is_game_over(self.board, move_history=self.history)
@@ -353,6 +368,7 @@ class GameController:
 
         self.board = Board()
         self.history = [MoveEntry(pos_hash=self.board.zobrist_hash)]
+        self._perpetual_warning_shown_count = 0
 
     def matchup_line(self) -> str:
         """生成当前控制器绑定的红黑对阵说明字符串。
