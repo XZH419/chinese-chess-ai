@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import random
 from datetime import datetime
 from queue import Empty
 from typing import Dict, Optional, Tuple
@@ -1219,6 +1220,32 @@ class MainWindow(QMainWindow):
             outcome = self.controller.apply_move(
                 move, player=self.controller.board.current_player
             )
+            if not outcome.ok:
+                msg = outcome.message or "未知原因"
+                self.append_log(f"[界面] AI 着法被拒绝：{msg}")
+                print(f"[界面] AI 着法被拒绝：{msg}")
+                legal_fb = list(
+                    Rules.get_legal_moves(
+                        self.controller.board,
+                        self.controller.board.current_player,
+                        history=self.controller.history,
+                    )
+                )
+                if not legal_fb:
+                    self._refresh_status()
+                    return
+                fb = random.choice(legal_fb)
+                self.append_log(f"[界面] 已用随机合法应手替代：{fb}")
+                print(f"[界面] 已用随机合法应手替代：{fb}")
+                outcome_fb = self.controller.apply_move(
+                    fb, player=self.controller.board.current_player
+                )
+                if not outcome_fb.ok:
+                    self._refresh_status()
+                    return
+                self.board_view.animate_move(fb)
+                self._finalize_after_legal_move(outcome_fb)
+                return
             self.board_view.animate_move(move)
             self._finalize_after_legal_move(outcome)
         else:

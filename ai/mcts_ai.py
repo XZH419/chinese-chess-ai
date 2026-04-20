@@ -144,7 +144,13 @@ def _simulate(board: Board, root_player: str, t0: float, tl: float) -> float:
     if sim_board.current_player != root_player: raw = -raw
     return 1.0 / (1.0 + math.exp(-raw / _SCORE_SCALE))
 
-def _run_single_mcts_tree(board: Board, max_sims: int, tl: float, seed: int = 0) -> Dict:
+def _run_single_mcts_tree(
+    board: Board,
+    max_sims: int,
+    tl: float,
+    seed: int = 0,
+    move_history: Optional[List[MoveEntry]] = None,
+) -> Dict:
     random.seed(time.time_ns() + seed)
     t0, root_board = time.perf_counter(), board
     root = MCTSNode(board.zobrist_hash, "black" if board.current_player == "red" else "red")
@@ -181,7 +187,20 @@ def _run_single_mcts_tree(board: Board, max_sims: int, tl: float, seed: int = 0)
             selection_depth += 1
             
         if node.untried_moves is None:
-            node.untried_moves = list(Rules.get_pseudo_legal_moves(sim_board, sim_board.current_player))
+            # 根结点必须用完整合法走法，否则被将军时会扩展出「伪合法但不解将」的边，
+            # 最终选出的一步会被 Rules.is_valid_move 拒绝。
+            if node is root:
+                node.untried_moves = list(
+                    Rules.get_legal_moves(
+                        sim_board,
+                        sim_board.current_player,
+                        history=move_history,
+                    )
+                )
+            else:
+                node.untried_moves = list(
+                    Rules.get_pseudo_legal_moves(sim_board, sim_board.current_player)
+                )
             random.shuffle(node.untried_moves)
 
         if node.untried_moves:
@@ -236,7 +255,17 @@ class MCTSAI:
         if not math.isfinite(tl) or tl <= 0:
             tl = float(self.time_limit)
         t0 = time.perf_counter()
-        merged = _run_single_mcts_tree(board, self.max_simulations, tl)
+        mh = kwargs.get("move_history")
+        merged = _run_single_mcts_tree(board, self.max_simulations, tl, move_history=mh)
+
+        # 安全网：理论上根边均为合法；若仍有残留键则过滤。
+        legal_root = {
+            m
+            for m in Rules.get_legal_moves(
+                board, board.current_player, history=mh
+            )
+        }
+        merged = {m: st for m, st in merged.items() if m in legal_root}
 
         # 3. 决策：综合 Visits 和 战术偏置
         if not merged:
